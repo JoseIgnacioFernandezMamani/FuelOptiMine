@@ -1,0 +1,73 @@
+# Configuración global: normalizar finales de línea automáticamente
+* text=auto eol=lf
+
+# Asegurar que todos los archivos de texto usen LF en el repositorio
+# pero se conviertan según las configuraciones locales al checkout
+*.txt text
+*.md text
+*.json text
+*.yaml text
+*.yml text
+*.xml text
+*.html text
+*.css text
+*.js text
+*.py text
+
+# Para archivos específicos de Python
+*.py text diff=python eol=lf
+*.pyx text diff=python eol=lf
+*.pxd text diff=python eol=lf
+*.ipynb text eol=lf
+
+# Archivos de configuración
+*.toml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+requirements.txt text eol=lf
+Makefile text eol=lf
+
+# Scripts Shell deben siempre usar LF
+*.sh text eol=lf
+*.bash text eol=lf
+*.zsh text eol=lf
+
+# Scripts de Windows usan CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Archivos binarios que nunca deben ser modificados
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg binary
+*.woff binary
+*.woff2 binary
+*.eot binary
+*.ttf binary
+*.otf binary
+
+# Archivos de datos binarios
+*.parquet binary
+*.pkl binary
+*.h5 binary
+*.hdf5 binary
+*.joblib binary
+*.pt binary
+*.pth binary
+
+# Archivos de office como binarios
+*.xlsx binary
+*.xls binary
+*.docx binary
+*.doc binary
+*.pptx binary
+*.pdf binary
+
+# Archivos de Python compilados
+*.pyc binary
+*.pyo binary
+*.pyd binary

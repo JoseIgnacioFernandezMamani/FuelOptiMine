@@ -1,0 +1,12 @@
+digraph "Mi Flujo de Trabajo" {
+	graph [bgcolor=transparent fontcolor="#2D3436" fontname="Sans-Serif" fontsize=15 label="Mi Flujo de Trabajo" nodesep=0.60 pad=2.0 rankdir=LR ranksep=0.75 splines=ortho]
+	node [fixedsize=true fontcolor="#2D3436" fontname="Sans-Serif" fontsize=13 height=1.4 imagescale=true labelloc=b shape=box style=rounded width=1.4]
+	edge [color="#7B8894"]
+	"200326f527904a8b93bf5f98957438c4" [label=Procesamiento height=1.9 image="D:\Develop\AI-DataAssistant\venv\Lib\site-packages\resources/programming/language\python.png" shape=none]
+	"18bbdad1db67414581995f6b98d40b0a" [label=Documento height=1.9 image="D:\Develop\AI-DataAssistant\venv\Lib\site-packages\resources/programming/flowchart\input-output.png" shape=none]
+	"06826e99ab6b4e54a8f39a81313aba8c" [label="Análisis" height=1.9 image="D:\Develop\AI-DataAssistant\venv\Lib\site-packages\resources/programming/flowchart\action.png" shape=none]
+	a15176b33edc4bc29fcf9c1e3b1884f9 [label="Base de Datos" height=1.9 image="D:\Develop\AI-DataAssistant\venv\Lib\site-packages\resources/onprem/database\postgresql.png" shape=none]
+	"18bbdad1db67414581995f6b98d40b0a" -> "200326f527904a8b93bf5f98957438c4" [dir=forward fontcolor="#2D3436" fontname="Sans-Serif" fontsize=13]
+	"200326f527904a8b93bf5f98957438c4" -> "06826e99ab6b4e54a8f39a81313aba8c" [dir=forward fontcolor="#2D3436" fontname="Sans-Serif" fontsize=13]
+	"06826e99ab6b4e54a8f39a81313aba8c" -> a15176b33edc4bc29fcf9c1e3b1884f9 [dir=forward fontcolor="#2D3436" fontname="Sans-Serif" fontsize=13]
+}

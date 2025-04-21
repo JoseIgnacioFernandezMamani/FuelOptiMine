@@ -1,0 +1,101 @@
+# Entorno virtual
+fueloptimine-env/
+venv/
+env/
+.env
+
+# Archivos de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+notebooks/.ipynb_checkpoints/
+
+# Datos (si deseas excluir)
+data-set/**/*.csv
+data-set/**/*.xlsx
+data-set/**/*.parquet
+data-set/**/*.json
+data-set/**/*.pkl
+
+# Modelo guardado (archivos pesados)
+model/predictive/**/registry/*
+*.h5
+*.pkl
+*.model
+*.joblib
+*.pt
+*.pth
+
+# Archivos MLflow
+mlruns/
+mlartifacts/
+
+# Logs y reportes
+*.log
+logs/
+reports/
+analytics/reports/*.pdf
+analytics/reports/*.xlsx
+
+# Configuración local que no debe compartirse
+config/local.py
+config/secrets.toml
+config/credentials.yaml
+*.env
+
+# Archivos de Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Archivos de macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Archivos IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.vs/
+*.sublime-workspace
+*.sublime-project
+
+# Archivos temporales
+.tmp/
+.temp/
+tmp/
+temp/
+
+# Archivos de prueba
+.coverage
+htmlcov/
+.pytest_cache/
+tests/temp/
+.tox/
+
+# Archivos específicos de la API
+backend/api/keys/
+backend/api/config/secrets.json
