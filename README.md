@@ -35,7 +35,7 @@ Sistema predictivo y de optimización para la gestión inteligente de recursos e
 | Módulo                  | Tecnologías Clave                              | Descripción                                                       |
 | ----------------------- | ---------------------------------------------- | ----------------------------------------------------------------- |
 | **Núcleo Analítico**    | `pandas`, `scipy`, `numpy`                     | Procesamiento de datos históricos y en tiempo real                |
-| **Modelado Predictivo** | `scikit-learn`, `XGBoost`                      | Modelos de regresión lineal y boosting para predicción de consumo |
+| **Modelado Predictivo** | `scikit-learn`, `XGBoost`, `mlflow`                      | Modelos de regresión lineal y boosting para predicción de consumo |
 | **Visualización**       | `plotly`, `streamlit`, `matplotlib`, `seaborn` | Gráficos interactivos y análisis espacial                         |
 | **Optimización**        | `pulp`, `scipy.optimize`                       | Algoritmos MILP para rutas y asignación de recursos               |
 | **IA Contextual**       | `transformers`, `Mistral-7B`                   | Análisis de eventos no estructurados y NLP                        |
@@ -418,16 +418,66 @@ pylint backend/ frontend/ # Verificación de calidad
 
 ```mermaid
 sequenceDiagram
-    participant Sensor
+    participant Sensores
+    participant Validacion
+    participant ETL_Core
+    participant ModelRegistry
+    participant Orchestrator
     participant Backend
-    participant Modelos
     participant Interfaces
+    participant Analytics
+    participant Almacenamiento
 
-    Sensor->>Backend: Datos en tiempo real
-    Backend->>Modelos: Preprocesamiento → Predicción
-    Modelos->>Backend: Resultado (JSON)
-    Backend->>Interfaces: Renderizado simple
-    Interfaces->>Usuario: Dashboard minimalista
+    rect rgb(25, 55, 100)
+    Note over Sensores,ETL_Core: Fase 1: Ingesta y Procesamiento
+    Sensores->>ETL_Core: Stream datos IoT (MQTT/HTTP)
+    Validacion->>ETL_Core: Datos históricos (Batch)
+    ETL_Core->>ETL_Core: Validación Great Expectations
+    alt Datos válidos
+        ETL_Core->>Almacenamiento: Guardar en Data Lake (Parquet)
+    else Datos inválidos
+        ETL_Core->>Orchestrator: Alerta de calidad
+        Orchestrator->>Backend: Notificar error (WebSocket)
+    end
+    end
+
+    rect rgb(40, 100, 60)
+    Note over Orchestrator,ModelRegistry: Fase 2: Entrenamiento Modelos
+    Orchestrator->>Orchestrator: Programar tarea (Cron/Noche)
+    Orchestrator->>ETL_Core: Solicitar datos entrenamiento
+    ETL_Core->>Orchestrator: Dataset procesado
+    Orchestrator->>ModelRegistry: Ejecutar pipeline ML (Kedro)
+    ModelRegistry->>ModelRegistry: Entrenar modelo (XGBoost)
+    ModelRegistry->>ModelRegistry: Evaluar métricas (RMSE, MAE)
+    ModelRegistry->>Almacenamiento: Versionar modelo (MLflow)
+    ModelRegistry->>Analytics: Generar reporte explicativo (SHAP)
+    end
+
+    rect rgb(100, 40, 80)
+    Note over Backend,Interfaces: Fase 3: Interacción Usuario
+    Interfaces->>Backend: POST /analyze (JWT)
+    Backend->>Orchestrator: Disparar pipeline (Celery)
+    Orchestrator->>ETL_Core: Obtener datos en tiempo real
+    ETL_Core->>Orchestrator: Datos para predicción
+    Orchestrator->>ModelRegistry: Cargar modelo (v1.2.3)
+    ModelRegistry->>Orchestrator: Resultado predicción
+    Orchestrator->>Analytics: Generar visualizaciones
+    Analytics->>Almacenamiento: Guardar reporte PDF
+    Orchestrator->>Backend: Respuesta estructurada
+    Backend->>Interfaces: Dashboard (Streamlit/WebSocket)
+    end
+
+    rect rgb(80, 80, 80)
+    Note over Analytics,Almacenamiento: Fase 4: Monitoreo Continuo
+    loop Cada 6h
+        Analytics->>ETL_Core: Obtener últimos datos
+        Analytics->>ModelRegistry: Chequear drift (ADWIN)
+        alt Drift detectado
+            ModelRegistry->>Orchestrator: Solicitar reentrenamiento
+            Orchestrator->>Backend: Notificar alerta
+        end
+    end
+    end
 ```
 
 
@@ -506,3 +556,54 @@ Para diferenciar claramente entre tipos de fuentes, es recomendable:
 - **Control de transacciones**: Asegura que las operaciones sean atómicas cuando sea necesario, especialmente en la fase de Load.
 
 Siguiendo estas prácticas, podrás construir un sistema ETL robusto, mantenible y escalable que se adapte bien a las necesidades de un proyecto de análisis de datos y modelos matemáticos de alto nivel.
+
+
+
+estrcutura de cualquiern modulo:
+
+
+modulo-nombre/  # Por ejemplo: extract/, transform/, o load/
+│
+├───core/  # Funcionalidad central y componentes básicos
+│   ├───__init__.py
+│   ├───base.py  # Clases e interfaces base
+│   └───exceptions.py  # Excepciones específicas del módulo
+│
+├───interfaces/  # Contratos e interfaces del módulo
+│   ├───__init__.py
+│   └───[nombre_interfaz].py  # Interfaces específicas
+│
+├───models/  # Modelos de datos y estructuras
+│   ├───__init__.py
+│   └───[nombre_modelo].py  # Definiciones de modelos
+│
+├───implementations/  # Implementaciones concretas
+│   ├───__init__.py
+│   ├───[tipo_implementacion1]/
+│   │   ├───__init__.py
+│   │   └───[implementacion_especifica].py
+│   └───[tipo_implementacion2]/
+│       ├───__init__.py
+│       └───[implementacion_especifica].py
+│
+├───utils/  # Utilidades específicas del módulo
+│   ├───__init__.py
+│   └───[utilidad].py
+│
+├───config/  # Configuraciones
+│   ├───__init__.py
+│   ├───default.py  # Configuraciones por defecto
+│   └───schemas.py  # Esquemas de validación para configuraciones
+│
+├───factories/  # Factories para crear instancias
+│   ├───__init__.py
+│   └───[factory].py
+│
+├───tests/  # Pruebas unitarias y de integración
+│   ├───__init__.py
+│   ├───unit/
+│   │   └───test_[componente].py
+│   └───integration/
+│       └───test_[escenario].py
+│
+└───__init__.py  # Hace importable el módulo y define interfaces públicas
