@@ -1,4 +1,4 @@
-# interfaces/__init__.py
-from .base import IBaseExtractor  # <-- Nombre correcto
+from .base import IBaseExtractor
+from .local import IFileExtractor
 
-__all__ = ["IBaseExtractor"]
+__all__ = ["IBaseExtractor", "IFileExtractor"]

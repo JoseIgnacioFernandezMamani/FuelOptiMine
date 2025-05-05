@@ -25,3 +25,5 @@ SUPPORTED_FORMATS = {
 }
 
 DATASET_TYPES = [ "test_data", "val_data", "train_data" ]
+
+FUEL_SUPPLY = ['Veh', 'Descripcion', 'fin_desp', 'volumCorregido']

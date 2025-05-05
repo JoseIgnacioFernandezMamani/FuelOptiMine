@@ -1,27 +1,18 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Dict, List, Tuple
 import polars as pl
 
 class IBaseExtractor(ABC):
-    """Interface defining the contract for data loading classes"""
+    """Base interface for all data extractors"""
     
     @abstractmethod
-    def load_data(self) -> Dict[str, pl.DataFrame]:
+    def load_data(self) -> Tuple[Dict[str, pl.DataFrame], List[str]]:
         """
-        Load all types of data into separate DataFrames
+        Load data from source
         
         Returns:
-            Dict[str, pl.DataFrame]: Dictionary with data types as keys and DataFrames as values
+            Tuple: 
+                - Dict with data type as key and DataFrame as value
+                - List of unsupported/unprocessable files/sources
         """
         pass
-
-    @abstractmethod
-    def _load_single_file(self) -> pl.DataFrame:
-        """
-        Load a single file into a DataFrame
-        
-        Returns:
-            pl.DataFrame: Loaded DataFrame
-        """
-        pass
-    

@@ -1,3 +1,3 @@
-from .implementations.local.csv_extractor import CSVExtractor  # Ejemplo
+from .implementations.local.csv_extractor import CSVExtractor 
 
-__all__ = ["CSVExtractor"]  # Ajusta según tus clases
+__all__ = ["CSVExtractor"] 

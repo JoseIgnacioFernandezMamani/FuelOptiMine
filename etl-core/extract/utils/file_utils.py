@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Union, List, Tuple
 from glob import glob
+import polars as pl
+
 from extract.models.schemas import SUPPORTED_FORMATS, DATASET_TYPES
 
 def get_file_extension(file_path: Union[str, Path], format: str) -> str:
@@ -45,8 +47,8 @@ def validate_truck_exists(base_dir: Path, dataset: str, truck: str, file_extensi
         raise FileNotFoundError(f"No files found for truck {truck} in {dataset} dataset")
     return True
 
-def generate_file_patterns(base_dir: Path, dataset: str, truck: str, 
-                          data_type: str, file_extension: str) -> List[str]:
+def generate_file_patterns(base_dir: Path, dataset: str, data_type: str, 
+                           truck: str, file_extension: str) -> List[str]:
     """Generates search patterns for truck data files."""
     if dataset not in DATASET_TYPES:
         raise ValueError(f"Invalid dataset type. Valid: {DATASET_TYPES}")
