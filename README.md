@@ -36,7 +36,7 @@ Sistema predictivo y de optimización para la gestión inteligente de recursos e
 | ----------------------- | ---------------------------------------------- | ----------------------------------------------------------------- |
 | **Núcleo Analítico**    | `pandas`, `scipy`, `numpy`                     | Procesamiento de datos históricos y en tiempo real                |
 | **Modelado Predictivo** | `scikit-learn`, `XGBoost`, `mlflow`                      | Modelos de regresión lineal y boosting para predicción de consumo |
-| **Visualización**       | `plotly`, `streamlit`, `matplotlib`, `seaborn` | Gráficos interactivos y análisis espacial                         |
+| **Visualización**       | `plotly`, `reflex`, `geopandas`, `folium`, `geopandas`, `seaborn` | Gráficos interactivos y análisis espacial                         |
 | **Optimización**        | `pulp`, `scipy.optimize`                       | Algoritmos MILP para rutas y asignación de recursos               |
 | **IA Contextual**       | `transformers`, `Mistral-7B`                   | Análisis de eventos no estructurados y NLP                        |
 | **Infraestructura**     | `uvicorn`, `fastAPI`              | Backend performante y frontend intuitivo                          |
@@ -164,32 +164,34 @@ FuelOptiMine/
 │   ├── finetuning/             # ⚙️ Ajuste Mistral-7B (LoRA/QLoRA)
 │   └── evaluation/             # 📊 Métricas LLM (BLEU, ROUGE, BERTScore)
 │
-├── etl/
-│   ├── extractors/
-│   │   ├── base_extractor.py    # Clase padre con logging/errores
-│   │   ├── fuel_extractor.py    # Específico para CSV de combustible
-│   │   ├── sensor_extractor.py  # Lee JSON de sensores IoT
-│   │   └── validation_data_extractor.py  # Lee JSON de sensores IoT
+├── etl_core/
+│   ├── extract/
+│   │   ├── config
+│   │   ├── exceptions
+│   │   ├── factories
+│   │   ├── implementations
+│   │   │   ├── external
+│   │   │   └── local
+│   │   │       ├── __init__.py
+│   │   │       └── csv_extractor.py
+│   │   ├── interfaces
+│   │   ├── models
+│   │   ├── scripts
+│   │   ├── tests
+│   │   ├── utils
+│   │   └── __init__.py
 │   │
-│   ├── transformers/
-│   │   ├── base_transformer.py  # Métodos para columnas comunes
-│   │   ├── fuel_transformer.py  # Calcula litros desde galones
-│   │   ├── sensor_transformer.py # Convierte unidades de vibración
-│   │   └── validation_data_transformer.py # Convierte unidades de vibración
+│   ├── transform/
+│   │   ├── core/
+│   │   ├── implementations
+│   │   └── scripts
+│   │       └── test_fuel_supply.py
 │   │
-│   ├── loaders/
-│   │   ├── base_loader.py       # Conexión genérica a DB
-│   │   ├── fuel_loader.py       # Inserta en tabla fuel_metrics
-│   │   ├── sensor_loader.py     # Carga en time_series_db
-│   │   └── validation_data_loader.py     # Carga en time_series_db
-│   │
-│   ├── pipelines/               # 🎛️ Combinaciones específicas
-│   │   ├── fuel_pipeline.py     # FuelExtractor → FuelTransformer → FuelLoader
-│   │   └── sensor_pipeline.py   # SensorExtractor → SensorTransformer → SensorLoader
+│   ├── load/
 │   │
 │   └── utils/
-│       ├── validators.py        # Verifica columnas comunes
-│       └── schema_tools.py      # Mapeo de nombres de columnas
+│       ├── __init__.py        
+│       └── equipment_constants.py
 │
 ├── interfaces/
 │    └── web/                        # 🌐 Interfaz Web Principal (Streamlit)
