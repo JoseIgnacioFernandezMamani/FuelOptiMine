@@ -609,3 +609,7 @@ modulo-nombre/  # Por ejemplo: extract/, transform/, o load/
 │       └───test_[escenario].py
 │
 └───__init__.py  # Hace importable el módulo y define interfaces públicas
+
+responsabilidades
+frontend: UI, visualizacion de datos, gestion estado, feedback de errores.
+backend: etl, autenticacion/autorizacion, modelo predictivo, business logic, APIs.
