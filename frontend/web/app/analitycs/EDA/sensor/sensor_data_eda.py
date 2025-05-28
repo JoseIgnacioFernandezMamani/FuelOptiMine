@@ -191,43 +191,79 @@ class SensorDataEDA:
 
     def _detect_refill_events(
         self,
-        min_refill_percentage=0.30,
-        multiplicative_factor=1.2,
-        min_fuel_percentage=20,
+        min_refill_threshold=182.8,
+        # Basado en el análisis de los documentos donde se calcula el umbral de recarga
     ) -> pl.DataFrame:
-        max_tank_capacity = 3200
-        min_refill_threshold = max_tank_capacity * min_refill_percentage
 
         refill_df = (
             self.sensor_df.with_columns(
-                valid_fuel=pl.when(~pl.col("SensorOff"))
+                valid_fuel=pl.when(pl.col("FuelLevelLiters") != 0)
                 .then(pl.col("FuelLevelLiters"))
                 .otherwise(None)
                 .forward_fill()
             )
             .with_columns(
                 before_avg=pl.col("valid_fuel")
-                .shift(1)
+                .shift(1)  # comenzar desde el anterior registro al que se analiza
+                .rolling_map(
+                    window_size=10,
+                    function=lambda s: (m := s.filter(s > 0).mean()) or 0.0,
+                    min_samples=5,
+                ),
+                after_avg=pl.col("valid_fuel")
+                .shift(-1)
+                .reverse()
                 .rolling_map(
                     window_size=10,
                     function=lambda s: (m := s.filter(s > 0).mean()) or 0.0,
                     min_samples=5,
                 )
+                .reverse(),
             )
+            .with_columns(DeltaFuel=pl.col("valid_fuel").diff().fill_null(0))
             .filter(
                 (pl.col("DeltaFuel") > min_refill_threshold)
-                & (pl.col("DeltaFuelPercent") >= min_fuel_percentage)
-                & (
-                    pl.col("FuelLevelLiters")
-                    > pl.col("before_avg") * multiplicative_factor
-                )
+                & (pl.col("after_avg") > (pl.col("before_avg") + min_refill_threshold))
             )
             .select(
                 pl.col("TimeStamp"),
                 pl.col("DeltaFuel"),
+                pl.col("valid_fuel"),
+                pl.col("after_avg"),
+                pl.col("before_avg"),
             )
         )
-        return refill_df
+
+        # agrupar eventos cercanos
+        refill_df = (
+            refill_df.sort("TimeStamp")
+            .with_columns(
+                time_diff=pl.col("TimeStamp").diff().dt.total_seconds().fill_null(601)
+            )
+            .with_columns(
+                group_id=pl.when(pl.col("time_diff") > 600)
+                .then(1)
+                .otherwise(0)
+                .cum_sum(),
+            )
+            .group_by("group_id")
+            .agg(
+                # Mantener el DeltaFuel original si el grupo es de 1 registro
+                pl.when(pl.count() > 1)
+                .then(pl.col("valid_fuel").last() - pl.col("valid_fuel").first())
+                .otherwise(pl.col("DeltaFuel").first())
+                .alias("DeltaFuel"),
+                pl.col("TimeStamp").max().alias("TimeStamp"),
+                pl.when(pl.count() > 1)
+                .then(pl.col("valid_fuel").last())
+                .otherwise(pl.col("valid_fuel").first())
+                .alias("valid_fuel"),
+                pl.col("before_avg").first().alias("before_avg"),
+                pl.col("after_avg").last().alias("after_avg"),
+            )
+        )
+
+        return refill_df.drop("group_id").sort("TimeStamp")
 
     def search_best_params(
         self, target: int = 341, max_combinations: int = 10000, max_threads: int = 4
@@ -339,7 +375,7 @@ if __name__ == "__main__":
     print(f"• Columnas: {analyzer.sensor_df.columns}\n")
 
     # 2. Buscar mejores parámetros para detectar al menos 372 eventos
-    print("\n🔍 Buscando mejores parámetros para detección de recargas:")
+    # print("\n🔍 Buscando mejores parámetros para detección de recargas:")
 
     refill_events = analyzer._detect_refill_events()
 
@@ -361,6 +397,8 @@ if __name__ == "__main__":
             refill_events.select(
                 pl.col("TimeStamp").dt.strftime("%Y-%m-%d %H:%M").alias("Fecha"),
                 pl.col("DeltaFuel").round(1),
+                pl.col("valid_fuel").round(1),
+                pl.col("before_avg").round(1),
             )
         )
 

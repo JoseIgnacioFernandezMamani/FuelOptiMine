@@ -613,3 +613,20 @@ modulo-nombre/  # Por ejemplo: extract/, transform/, o load/
 responsabilidades
 frontend: UI, visualizacion de datos, gestion estado, feedback de errores.
 backend: etl, autenticacion/autorizacion, modelo predictivo, business logic, APIs.
+
+```mermaid
+graph TD
+    subgraph Servidor_Local["Servidor Local"]
+        Auth["Autenticación Django"] -->|Admin| B["Panel Admin Django (Puerto 8000)"]
+        Auth -->|Usuario| A["Streamlit Frontend (Puerto 8501)"]
+        A -->|Lecturas Directas| C[("ClickHouse DB (Puertos: 9000/8123)")]
+        B -->|Operaciones CRUD| C
+        A -->|API Requests autenticacion| B
+    end
+
+    style Auth fill:#4ECDC4,color:white
+    style A fill:#FF6B6B,color:white
+    style B fill:#45B7D1,color:white
+    style C fill:#FFD93D,color:black
+```
+

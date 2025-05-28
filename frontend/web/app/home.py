@@ -31,22 +31,17 @@ def logout():
     st.stop()
 
 
-# Definición de páginas
-home = st.Page("components/home/home.py", title="Inicio")
-
-# EDA de datos
-sensor_eda = st.Page("components/eda/sensor_eda.py", title="EDA de Sensores")
-cycle_eda = st.Page("components/eda/cycle_eda.py", title="EDA de Ciclos")
-supply_eda = st.Page("components/eda/supply_eda.py", title="EDA de Combustible")
-time_model_eda = st.Page(
-    "components/eda/time_model_eda.py", title="EDA de Modelo de Tiempo"
+home = st.Page("components/home/home.py", title="Inicio", icon="🏠")
+sensor_eda = st.Page("components/eda/sensor_eda.py", title="EDA de Sensores", icon="🚥")
+cycle_eda = st.Page("components/eda/cycle_eda.py", title="EDA de Ciclos", icon="🔁")
+supply_eda = st.Page(
+    "components/eda/supply_eda.py", title="EDA de Combustible", icon="⛽"
 )
-
-# modelos predictivos
-model = st.Page("components/models/model.py", title="Modelo Predictivo")
-
-# configuraciones
-config = st.Page("components/config/config.py", title="Configuración")
+time_model_eda = st.Page(
+    "components/eda/time_model_eda.py", title="EDA de Modelo de Tiempo", icon="📅"
+)
+model = st.Page("components/models/model.py", title="Modelo Predictivo", icon="📈")
+config = st.Page("components/config/config.py", title="Configuración", icon="⚙️")
 
 # Navegación dinámica
 if not st.session_state.authenticated:
@@ -59,7 +54,7 @@ else:
         "Analisis": [cycle_eda, sensor_eda, supply_eda, time_model_eda],
         "Modelo": [model],
         "Configuración": [config],
-        "Cerrar Sesión": [st.Page(logout, title="Cerrar Sesión")],
+        "Cerrar Sesión": [st.Page(logout, title="Cerrar Sesión", icon="🚪")],
     }
 
     pg = st.navigation(nav_sections)

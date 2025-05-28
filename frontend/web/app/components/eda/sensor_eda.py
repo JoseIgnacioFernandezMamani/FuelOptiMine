@@ -3,6 +3,7 @@ from analitycs.EDA.sensor.sensor_data_eda import SensorDataEDA
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
+from streamlit_elements import elements, dashboard, mui, html
 
 
 @st.cache_resource
@@ -24,10 +25,10 @@ def show():
         st.success("✅ Datos cargados correctamente.")
 
     # Configuración común
-    df = st.session_state.df.to_pandas()  # Convertir a Pandas para Plotly
+    # df = st.session_state.df.to_pandas()  # Convertir a Pandas para Plotly
+    df = st.session_state.df
 
-    # Layout principal
-    col_config, _ = st.columns([2, 1])
+    col_config = st.container()
 
     with col_config:
         st.header("Configuración de Visualizaciones")
@@ -35,9 +36,10 @@ def show():
 
         # Pestaña de Serie Temporal
         with tab1:
-            # Selector de fecha
-            min_date = df["TimeStamp"].min().date()
-            max_date = df["TimeStamp"].max().date()
+
+            min_date = df["TimeStamp"].dt.date().min()
+            max_date = df["TimeStamp"].dt.date().max()
+
             selected_date = st.date_input(
                 "Seleccionar fecha para análisis temporal",
                 value=max_date,
@@ -45,16 +47,15 @@ def show():
                 max_value=max_date,
             )
 
-            # Filtrar datos para la fecha seleccionada
-            filtered_data = df[(df["TimeStamp"].dt.date == selected_date)]
+            filtered_data = df.filter(df["TimeStamp"].dt.date() == selected_date)
 
             # Crear gráfico temporal
-            if not filtered_data.empty:
+            if not filtered_data.is_empty():
                 fig_temporal = go.Figure()
                 fig_temporal.add_trace(
                     go.Scattergl(
-                        x=filtered_data["TimeStamp"],
-                        y=filtered_data["FuelLevelLiters"],
+                        x=filtered_data["TimeStamp"].to_numpy(),
+                        y=filtered_data["FuelLevelLiters"].to_numpy(),
                         mode="lines",
                         name="Nivel de Combustible",
                         line=dict(color="#1f77b4", width=1),

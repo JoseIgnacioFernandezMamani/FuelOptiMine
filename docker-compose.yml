@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  ch-ui:
+    image: ghcr.io/caioricciuti/ch-ui:latest
+    container_name: ch-ui
+    ports:
+      - "5521:5521"
+    environment:
+      - VITE_CLICKHOUSE_URL=http://172.17.65.49:8123
+      - VITE_CLICKHOUSE_USER=default
+      - VITE_CLICKHOUSE_PASS=password
+      - VITE_CLICKHOUSE_USE_ADVANCED=true
+      - VITE_CLICKHOUSE_REQUEST_TIMEOUT=30000
+    restart: unless-stopped  # Opcional: reinicia el contenedor automáticamente
