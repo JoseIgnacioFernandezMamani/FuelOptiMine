@@ -56,6 +56,8 @@ class SensorSupplyEventCorrelator:
             .rename({"TimeStamp": "SupplyTimeStamp"})
         )
 
+        return self.fuel_supply_df
+
     def correlate_events(self) -> pl.DataFrame:
         """Correlaciona eventos usando un sistema de puntuación personalizado."""
 
@@ -83,32 +85,49 @@ class SensorSupplyEventCorrelator:
                 / pl.duration(hours=12)
             )
             * 0.5,
-            # Criterio 2: Discrepancia de combustible entre delta y recarga combustible
+            # Criterio 2: Discrepancia de combustible entre delta y recarga combustible (30%)
             fuel_diff_score=(
                 1
                 - (pl.col("DeltaFuel") - pl.col("FuelLevelLiters")).abs()
                 / pl.max_horizontal([pl.col("DeltaFuel"), pl.col("FuelLevelLiters")])
             )
             * 0.3,
-            # Criterio 3: Consideracion del origen de la recarga
+            # Criterio 3: Consideracion del origen de la recarga (20%)
             origin_score=(
                 pl.when(pl.col("Origin").is_in(["SURTIDOR-TRUCKSHOP"]))
-                .then(70)
-                .otherwise(30)
-            )
-            * 0.2,
+                .then(0.14)
+                .otherwise(0.06)  # 20 % del puntaje total
+            ),
         ).with_columns(
             total_score=pl.col("time_score")
             + pl.col("fuel_diff_score")
             + pl.col("origin_score"),
         )
 
-        best_matches = (
-            scored.filter(pl.col("total_score") > 0)
-            .sort("total_score", descending=True)
-            .group_by("RefillTimeStamp")
-            .first()
+        # Filtramos por score aceptable y ordenamos por mayor puntuación
+        scored_sorted = scored.filter(pl.col("total_score") > 0).sort(
+            "total_score", descending=True
         )
+
+        # Creamos sets para evitar emparejamientos repetidos
+        matched_refills: set = set()
+        matched_supplies: set[tuple] = set()
+        best_matches_rows = []
+
+        # Recorremos por orden de puntuación (voraz)
+        for row in scored_sorted.iter_rows(named=True):
+            refill_ts = row["RefillTimeStamp"]
+            supply_ts = (row["SupplyTimeStamp"], row["FuelLevelLiters"])
+
+            if refill_ts in matched_refills or supply_ts in matched_supplies:
+                continue
+
+            matched_refills.add(refill_ts)
+            matched_supplies.add(supply_ts)
+            best_matches_rows.append(row)
+
+        # Convertimos los matches a DataFrame
+        best_matches = pl.DataFrame(best_matches_rows)
 
         # Obtener supplies no emparejados
         matched_supplies = best_matches.select("SupplyTimeStamp").to_series().implode()
@@ -274,7 +293,6 @@ correlator = SensorSupplyEventCorrelator()
 correlator.load_datasets()
 correlator.filter_by_date_range(date(2024, 2, 1), date(2025, 2, 27))
 correlator._prepare()
-# result = correlator._create_unified_timeline()
 result = correlator.correlate_events()
 correlator.save_result("correlated_events3.csv", format="csv")
 print(result.height)
