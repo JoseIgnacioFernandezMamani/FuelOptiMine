@@ -1,62 +1,33 @@
-import argparse
-import polars as pl
-from etl.extract.csv_extractor import CsvExtractor
-from etl.transform.implementation.sensor.transformer import SensorTransformer
-from etl.load.sensor_loader import SensorLoader
-import logging
-import time
+from etl_core.load import ClickHouseLoader
+from etl_core.transform.implementation import (
+    SensorTransformer,
+    CycleTransformer,
+    FuelSupplyTransformer,
+    TimeModelTransformer,
+)
 
 
-def run_sensor_etl(file_path: str):
-    """Ejecuta el pipeline completo para datos de sensores"""
-    # 1. Extracción
-    logging.info("Iniciando extracción...")
-    extractor = CsvExtractor()
-    df = extractor.read(file_path)
+def run_etl_pipeline():
+    with ClickHouseLoader() as loader:
+        # Procesar y cargar datasets individuales
+        df_sensor = SensorTransformer().run_transform(raw_sensor_data)
+        loader.load_dataset("sensor", df_sensor)
 
-    # 2. Transformación
-    logging.info("Transformando datos...")
-    transformer = SensorTransformer()
-    transformed_df = transformer.transform(df)
+        # O cargar múltiples datasets
+        transformers = {
+            "cycle": CycleTransformer(),
+            "fuel_supply": FuelSupplyTransformer(),
+            "time_mode": TimeModelTransformer(),
+        }
 
-    # 3. Conversión a diccionarios
-    records = transformed_df.to_dicts()
+        for dataset_name, transformer in transformers.items():
+            df = transformer.run_transform(raw_data[dataset_name])
+            loader.load_dataset(dataset_name, df)
 
-    # 4. Carga
-    logging.info("Cargando a ClickHouse...")
-    loader = SensorLoader(
-        host="localhost",
-        port=9000,
-        user="default",
-        password="password",
-        database="default",
-    )
-
-    start_time = time.time()
-    record_count = loader.load_data(records)
-    elapsed = time.time() - start_time
-
-    logging.info(f"✅ Carga completada: {record_count} registros")
-    logging.info(f"⏱  Tiempo total: {elapsed:.2f} segundos")
-    logging.info(f"🚀 Velocidad: {record_count/elapsed:.2f} registros/segundo")
-
-
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-    )
-
-    parser = argparse.ArgumentParser(description="ETL Core Pipeline")
-    parser.add_argument(
-        "--type", required=True, choices=["sensor", "cycle", "fuel", "time"]
-    )
-    parser.add_argument("--file", required=True, help="Ruta al archivo de entrada")
-
-    args = parser.parse_args()
-
-    if args.type == "sensor":
-        run_sensor_etl(args.file)
-    elif args.type == "cycle":
-        # run_cycle_etl(args.file)
-        pass
-    # ... otros tipos
+        # Mostrar métricas
+        print("\n📊 Resumen de carga:")
+        print(f"Total filas: {loader.metrics['total_rows']}")
+        print(f"Rendimiento promedio: {loader.metrics['avg_rps']:.0f} filas/seg")
+        print("Detalle por dataset:")
+        for dataset, rows in loader.metrics["datasets_loaded"].items():
+            print(f"- {dataset}: {rows} filas")

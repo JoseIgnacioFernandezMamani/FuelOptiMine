@@ -1,6 +1,6 @@
-from transform.implementation.sensor.transformer import SensorTransformer
-from extract.implementations.local.csv_extractor import CSVExtractor
-from extract.config.settings import DATA_DIR
+from etl_core.transform.implementation.sensor.transformer import SensorTransformer
+from etl_core.extract.implementations.local.csv_extractor import CSVExtractor
+from etl_core.extract.config.settings import DATA_DIR
 import sys
 import os
 

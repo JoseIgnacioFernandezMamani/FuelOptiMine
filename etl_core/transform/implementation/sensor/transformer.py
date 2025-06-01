@@ -1,6 +1,6 @@
 from typing import List, Type
 from etl_core.transform.core.base_transformer import BaseTransformer
-from .schema import SensorSchema
+from etl_core.utils.sensor_schemas import SensorSchema
 from typing import Optional
 from pydantic import BaseModel
 import polars as pl

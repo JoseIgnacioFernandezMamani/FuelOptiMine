@@ -48,15 +48,25 @@ class SensorSupplyEventCorrelator:
             self.refill_df.select(["DeltaFuel", "TimeStamp", "before_avg", "after_avg"])
             .sort(["TimeStamp"])
             .rename({"TimeStamp": "RefillTimeStamp"})
+            .with_columns(
+                pl.when(pl.col("RefillTimeStamp").dt.hour().is_between(6, 17))
+                .then(pl.lit("D"))
+                .otherwise(pl.lit("N"))
+                .alias("refill_shift")
+            )
         )
 
         self.fuel_supply_df = (
             self.fuel_supply_df.select(["Origin", "TimeStamp", "FuelLevelLiters"])
             .sort(["TimeStamp"])
             .rename({"TimeStamp": "SupplyTimeStamp"})
+            .with_columns(
+                pl.when(pl.col("SupplyTimeStamp").dt.hour().is_between(6, 17))
+                .then(pl.lit("D"))
+                .otherwise(pl.lit("N"))
+                .alias("supply_shift")
+            )
         )
-
-        return self.fuel_supply_df
 
     def correlate_events(self) -> pl.DataFrame:
         """Correlaciona eventos usando un sistema de puntuación personalizado."""
@@ -65,43 +75,49 @@ class SensorSupplyEventCorrelator:
         refills = self.refill_df
         supplies = self.fuel_supply_df
 
-        # Crear producto cartesiano con ventana temporal de ±12 horas
+        # Crear producto cartesiano con ventana temporal de ±15 horas
         cross_join = refills.join(supplies, how="cross", suffix="_supply").filter(
             (
                 pl.col("SupplyTimeStamp")
-                >= pl.col("RefillTimeStamp") - pl.duration(hours=12)
+                >= pl.col("RefillTimeStamp") - pl.duration(hours=15)
             )
             & (
                 pl.col("SupplyTimeStamp")
-                <= pl.col("RefillTimeStamp") + pl.duration(hours=12)
+                <= pl.col("RefillTimeStamp") + pl.duration(hours=15)
             )
         )
         # Calcular puntuación (ejemplo con 2 criterios)
         scored = cross_join.with_columns(
-            # Criterio 1: Proximidad temporal (50%)
+            # Criterio 1: Proximidad temporal (40%)
             time_score=(
                 1
                 - (pl.col("RefillTimeStamp") - pl.col("SupplyTimeStamp")).abs()
                 / pl.duration(hours=12)
             )
-            * 0.5,
+            * 0.35,
             # Criterio 2: Discrepancia de combustible entre delta y recarga combustible (30%)
             fuel_diff_score=(
                 1
                 - (pl.col("DeltaFuel") - pl.col("FuelLevelLiters")).abs()
                 / pl.max_horizontal([pl.col("DeltaFuel"), pl.col("FuelLevelLiters")])
             )
-            * 0.3,
+            * 0.35,
             # Criterio 3: Consideracion del origen de la recarga (20%)
             origin_score=(
                 pl.when(pl.col("Origin").is_in(["SURTIDOR-TRUCKSHOP"]))
-                .then(0.14)
-                .otherwise(0.06)  # 20 % del puntaje total
+                .then(0.10)
+                .otherwise(0.05)  # 15 % del puntaje total
+            ),
+            shift_score=(
+                pl.when(pl.col("supply_shift") == pl.col("refill_shift"))
+                .then(0.15)  # 10% del puntaje total
+                .otherwise(0.0)
             ),
         ).with_columns(
             total_score=pl.col("time_score")
             + pl.col("fuel_diff_score")
-            + pl.col("origin_score"),
+            + pl.col("origin_score")
+            + pl.col("shift_score"),
         )
 
         # Filtramos por score aceptable y ordenamos por mayor puntuación
@@ -146,12 +162,14 @@ class SensorSupplyEventCorrelator:
             pl.lit(None).alias("RefillTimeStamp"),
             pl.lit(None).alias("before_avg"),
             pl.lit(None).alias("after_avg"),
+            pl.lit(None).alias("refill_shift"),
         )
 
         unmatched_refills = unmatched_refills.with_columns(
             pl.lit(None).alias("Origin"),
             pl.lit(None).alias("SupplyTimeStamp"),
             pl.lit(None).alias("FuelLevelLiters"),
+            pl.lit(None).alias("supply_shift"),
         )
 
         # Seleccionar mismas columnas en ambos DataFrames
@@ -163,6 +181,8 @@ class SensorSupplyEventCorrelator:
             "Origin",
             "SupplyTimeStamp",
             "FuelLevelLiters",
+            "supply_shift",
+            "refill_shift",
         ]
 
         correlate_df = pl.concat(
@@ -178,12 +198,6 @@ class SensorSupplyEventCorrelator:
             .abs()
             .dt.total_seconds(),
             fuel_discrepancy=((pl.col("DeltaFuel")) - pl.col("FuelLevelLiters")).abs(),
-            supply_turno=pl.when(pl.col("SupplyTimeStamp").dt.hour().is_between(6, 17))
-            .then(pl.lit("D"))
-            .otherwise(pl.lit("N")),
-            refill_turno=pl.when(pl.col("RefillTimeStamp").dt.hour().is_between(6, 17))
-            .then(pl.lit("D"))
-            .otherwise(pl.lit("N")),
         ).with_columns(
             classification=pl.when(
                 (pl.col("RefillTimeStamp") >= pl.col("SupplyTimeStamp"))

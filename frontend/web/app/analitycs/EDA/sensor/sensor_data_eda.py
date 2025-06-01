@@ -238,17 +238,18 @@ class SensorDataEDA:
         refill_df = (
             refill_df.sort("TimeStamp")
             .with_columns(
-                time_diff=pl.col("TimeStamp").diff().dt.total_seconds().fill_null(601)
+                time_diff=pl.col("TimeStamp").diff().dt.total_seconds().fill_null(60)
             )
             .with_columns(
-                group_id=pl.when(pl.col("time_diff") > 600)
+                group_id=pl.when(
+                    pl.col("time_diff") > 10800
+                )  # se agrupa datos con diferencia mayor a 6 horas
                 .then(1)
                 .otherwise(0)
                 .cum_sum(),
             )
             .group_by("group_id")
             .agg(
-                # Mantener el DeltaFuel original si el grupo es de 1 registro
                 pl.when(pl.count() > 1)
                 .then(pl.col("valid_fuel").last() - pl.col("valid_fuel").first())
                 .otherwise(pl.col("DeltaFuel").first())

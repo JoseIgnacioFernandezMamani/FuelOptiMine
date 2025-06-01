@@ -30,8 +30,6 @@ from etl_core.extract.models.schemas import (
 )
 from etl_core.extract.config.settings import DATA_DIR
 
-import os
-
 
 class CSVExtractor(IFileExtractor):
     """Extracts and consolidates tabular data from multiple file formats for specific trucks"""
