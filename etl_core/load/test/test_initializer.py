@@ -19,7 +19,8 @@ def check_schema_files():
         schema_path = config["schema_path"]
 
         # Convertir la ruta del módulo a ruta de archivo
-        file_path = schema_path.replace(".", "/") + ".py"
+        file_path = ".".join(schema_path.split(".")[:-1])
+        file_path = file_path.replace(".", "/") + ".py"
 
         if os.path.exists(file_path):
             print(f"✅ {dataset_name}: {schema_path} -> {file_path}")

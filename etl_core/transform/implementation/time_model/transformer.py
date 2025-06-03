@@ -1,6 +1,6 @@
 from typing import List, Type
 from etl_core.transform.core.base_transformer import BaseTransformer
-from .schemas import TimeModelSchema
+from etl_core.utils.time_model_schemas import TimeModelSchema
 from pydantic import BaseModel
 import polars as pl
 

@@ -7,7 +7,7 @@ import os
 
 def run_sensor_etl_pipeline():
     # Configuración de rutas y parámetros
-    truck_id = "T-210"
+    truck_id = "T-211"
     dataset_name = "train_data"
     data_type = "sensor"
 
@@ -86,7 +86,9 @@ def run_sensor_etl_pipeline():
             "efficiency_ratio",
         ]
         print(df_clean.select(sample_columns).head(105))
-
+        df_clean.write_csv(
+            "/mnt/d/Develop/FuelOptiMine/frontend/web/app/output/T-211_sensor.csv"
+        )
         # 6. Análisis adicional de las nuevas características
 
         """ print("\n📈 Estadísticas clave de las nuevas columnas:")

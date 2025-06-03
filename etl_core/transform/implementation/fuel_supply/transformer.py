@@ -1,7 +1,7 @@
 from typing import List, Type
-from etl_core.transform.core.base_transformer import BaseTransformer
-from etl_core.utils.equipment_constants import TRUCK_SPECS
-from etl_core.utils.fuel_supply_schemas import FuelSupplySchema
+from etl_core.transform.core import BaseTransformer
+from etl_core.utils import TRUCK_SPECS
+from etl_core.utils import FuelSupplySchema
 from pydantic import BaseModel
 import polars as pl
 

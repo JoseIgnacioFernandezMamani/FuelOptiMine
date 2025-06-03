@@ -28,13 +28,6 @@ SUPPORTED_FORMATS = {
     "binary_columnar": [".parquet", ".feather", ".orc"],
 }
 
-DATASET_TYPES = ["test_data", "val_data", "train_data"]
+DATASET_TYPES = ["train_data"]
 
 FUEL_SUPPLY = ["Veh", "Descripcion", "fin_desp", "volumCorregido"]
-
-# Para debugging - remover en producción
-if __name__ == "__main__":
-    print("COLUMN_MAPPING generado:")
-    for key, columns in COLUMN_MAPPING.items():
-        print(f"{key}: {len(columns)} columnas")
-        print(f"  {columns[:3]}...{columns[-3:] if len(columns) > 6 else columns[3:]}")

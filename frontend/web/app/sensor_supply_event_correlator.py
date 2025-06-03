@@ -27,7 +27,7 @@ class SensorSupplyEventCorrelator:
         self.refill_df = pl.read_csv("refill_events.csv").with_columns(
             pl.col("TimeStamp").str.strptime(pl.Datetime)
         )
-        self.fuel_supply_df = pl.read_csv("output/T-210_fuel_supply.csv").with_columns(
+        self.fuel_supply_df = pl.read_csv("output/T-211_fuel_supply.csv").with_columns(
             pl.col("TimeStamp").str.strptime(pl.Datetime)
         )
 
@@ -94,7 +94,7 @@ class SensorSupplyEventCorrelator:
                 - (pl.col("RefillTimeStamp") - pl.col("SupplyTimeStamp")).abs()
                 / pl.duration(hours=12)
             )
-            * 0.35,
+            * 0.40,
             # Criterio 2: Discrepancia de combustible entre delta y recarga combustible (30%)
             fuel_diff_score=(
                 1
@@ -110,7 +110,7 @@ class SensorSupplyEventCorrelator:
             ),
             shift_score=(
                 pl.when(pl.col("supply_shift") == pl.col("refill_shift"))
-                .then(0.15)  # 10% del puntaje total
+                .then(0.10)  # 10% del puntaje total
                 .otherwise(0.0)
             ),
         ).with_columns(

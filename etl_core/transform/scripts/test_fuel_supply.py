@@ -8,9 +8,21 @@ import os
 
 def run_fuel_supply_etl_pipeline():
     # Configuración de rutas y parámetros
-    truck_id = "T-210"
+    truck_id = "T-211"
     dataset_name = "train_data"
     data_type = "fuel_supply"
+
+    columns_to_keep = [
+        "Origin",
+        "ShiftDate",
+        "TimeStamp",
+        "Equipment",
+        "TruckFleet",
+        "FuelLevelLiters",
+        "LastRefuel",
+        "Shift",
+        "FuelLevel",
+    ]
 
     # Configurar rutas de importación
     sys.path.insert(
@@ -69,6 +81,18 @@ def run_fuel_supply_etl_pipeline():
         print("\n🔍 Muestra de datos normalizados:")
         print(df_clean.head(5))
         # print("Esquema final:", df_clean.schema)
+
+        df_selected = df_clean.select(columns_to_keep)
+
+        # Ruta de guardado
+        output_path = (
+            "/mnt/d/Develop/FuelOptiMine/frontend/web/app/output/T-211_fuel_supply.csv"
+        )
+
+        # Guardar como CSV
+        df_selected.write_csv(output_path)
+
+        print(f"\n💾 Archivo guardado en: {output_path}")
 
     except Exception as e:
         print(f"\n❌ Error crítico en el pipeline: {str(e)}")

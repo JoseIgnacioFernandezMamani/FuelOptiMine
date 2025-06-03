@@ -11,7 +11,7 @@ from datetime import datetime
 
 class SensorDataEDA:
     def __init__(self) -> None:
-        self.data_path = Path(DATA_DIR) / "T-210_sensor.csv"
+        self.data_path = Path(DATA_DIR) / "T-211_sensor.csv"
         self.sensor_df: pl.DataFrame = None
         self._stats_cache: Dict[str, Dict[str, Any]] = None
         self._data_loaded: bool = False
@@ -101,7 +101,7 @@ class SensorDataEDA:
                     ),
                     "skewness": df[col].skew(),
                     "kurtosis": df[col].kurtosis(),
-                    "non_null_count": df[col].count(),
+                    "non_null_count": df[col].len(),
                     "null_count": df[col].null_count(),
                 }
 
@@ -191,18 +191,44 @@ class SensorDataEDA:
 
     def _detect_refill_events(
         self,
-        min_refill_threshold=182.8,
+        min_refill_threshold=190,
         # Basado en el análisis de los documentos donde se calcula el umbral de recarga
     ) -> pl.DataFrame:
 
-        refill_df = (
-            self.sensor_df.with_columns(
-                valid_fuel=pl.when(pl.col("FuelLevelLiters") != 0)
-                .then(pl.col("FuelLevelLiters"))
-                .otherwise(None)
-                .forward_fill()
+        refill_df = self.sensor_df.with_columns(
+            median_next=pl.col("FuelLevelLiters").rolling_median(
+                window_size=10, min_samples=3
             )
-            .with_columns(
+        ).with_columns(
+            valid_fuel=pl.when(
+                (pl.col("FuelLevelLiters") > 0)
+                & (pl.col("FuelLevelLiters") < 3216)
+                & (
+                    (pl.col("median_next") - pl.col("FuelLevelLiters")).abs()
+                    < min_refill_threshold
+                )
+            )
+            .then(pl.col("FuelLevelLiters"))
+            .otherwise(None)
+            .forward_fill()
+        )
+
+        refill_df = refill_df.with_columns(
+            valid_fuel=pl.when(
+                (pl.col("valid_fuel") == pl.col("valid_fuel").shift(1))
+                | (
+                    (pl.col("valid_fuel").shift(1))
+                    > (pl.col("valid_fuel") + min_refill_threshold)
+                )
+                | (pl.col("valid_fuel") == pl.col("valid_fuel").shift(-1))
+            )
+            .then(None)
+            .otherwise(pl.col("valid_fuel"))
+            .forward_fill(),
+        )
+
+        refill_df = (
+            refill_df.with_columns(
                 before_avg=pl.col("valid_fuel")
                 .shift(1)  # comenzar desde el anterior registro al que se analiza
                 .rolling_map(
@@ -219,8 +245,8 @@ class SensorDataEDA:
                     min_samples=5,
                 )
                 .reverse(),
+                DeltaFuel=pl.col("valid_fuel").diff().fill_null(0),
             )
-            .with_columns(DeltaFuel=pl.col("valid_fuel").diff().fill_null(0))
             .filter(
                 (pl.col("DeltaFuel") > min_refill_threshold)
                 & (pl.col("after_avg") > (pl.col("before_avg") + min_refill_threshold))
@@ -233,12 +259,11 @@ class SensorDataEDA:
                 pl.col("before_avg"),
             )
         )
-
-        # agrupar eventos cercanos
+        # Agrupar eventos cercanos
         refill_df = (
             refill_df.sort("TimeStamp")
             .with_columns(
-                time_diff=pl.col("TimeStamp").diff().dt.total_seconds().fill_null(60)
+                time_diff=pl.col("TimeStamp").diff().dt.total_seconds().fill_null(60),
             )
             .with_columns(
                 group_id=pl.when(
@@ -250,12 +275,12 @@ class SensorDataEDA:
             )
             .group_by("group_id")
             .agg(
-                pl.when(pl.count() > 1)
+                pl.when(pl.len() > 1)
                 .then(pl.col("valid_fuel").last() - pl.col("valid_fuel").first())
                 .otherwise(pl.col("DeltaFuel").first())
                 .alias("DeltaFuel"),
                 pl.col("TimeStamp").max().alias("TimeStamp"),
-                pl.when(pl.count() > 1)
+                pl.when(pl.len() > 1)
                 .then(pl.col("valid_fuel").last())
                 .otherwise(pl.col("valid_fuel").first())
                 .alias("valid_fuel"),
@@ -385,23 +410,23 @@ if __name__ == "__main__":
         print("✅ Archivo CSV guardado como 'refill_events.csv'")
     except Exception as e:
         print(f"Error al guardar el archivo CSV: {e}")
-    # refill_events = analyzer.search_best_params(
-    #    target=341, max_combinations=20000, max_threads=8
-    # )
-
-    # 3. Mostrar resultados
-    if refill_events.is_empty():
-        print("❌ No se encontraron recargas válidas con los parámetros probados.")
-    else:
-        print(f"✅ {refill_events.height} eventos detectados")
-        print(
-            refill_events.select(
-                pl.col("TimeStamp").dt.strftime("%Y-%m-%d %H:%M").alias("Fecha"),
-                pl.col("DeltaFuel").round(1),
-                pl.col("valid_fuel").round(1),
-                pl.col("before_avg").round(1),
-            )
+        refill_events = analyzer.search_best_params(
+            target=341, max_combinations=20000, max_threads=8
         )
+
+        # 3. Mostrar resultados
+        if refill_events.is_empty():
+            print("❌ No se encontraron recargas válidas con los parámetros probados.")
+        else:
+            print(f"✅ {refill_events.height} eventos detectados")
+            print(
+                refill_events.select(
+                    pl.col("TimeStamp").dt.strftime("%Y-%m-%d %H:%M").alias("Fecha"),
+                    pl.col("DeltaFuel").round(1),
+                    pl.col("valid_fuel").round(1),
+                    pl.col("before_avg").round(1),
+                )
+            )
 
         # 4. Estadísticas clave
         print("\n📈 Estadísticas Clave:")
