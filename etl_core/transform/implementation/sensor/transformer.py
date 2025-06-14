@@ -1,13 +1,19 @@
-from typing import List, Type
 from etl_core.transform.core.base_transformer import BaseTransformer
 from etl_core.utils.sensor_schemas import SensorSchema
-from typing import Optional
+from typing import List, Type
 from pydantic import BaseModel
 import polars as pl
 
 
 class SensorTransformer(BaseTransformer):
-    """Clase temporal para testear solo common_clean"""
+    """
+    Transformer for data from fuel level, rpm and speed sensors.
+    Actions:
+    data cleaning, remove null or inconsistent records
+    data type casting, convert to correct data types
+    column normalization, convert to correct units
+    integrity validation, remove duplicate data
+    """
 
     def __init__(self):
         super().__init__()
@@ -25,7 +31,7 @@ class SensorTransformer(BaseTransformer):
         return SensorSchema
 
     def transform(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Transformaciones específicas para datos de sensores"""
+        """Specific transformations for sensor data"""
         try:
             # Verificar si hay datos para procesar
             if df.is_empty():

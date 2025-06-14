@@ -6,11 +6,11 @@ from typing import Optional
 class CycleSchema(BaseModel):
     """Esquema para datos de ciclos mineros (estructura bruta)"""
 
-    ShiftDate: date  # Campos obligatorios
+    ShiftDate: date  # required field
     Shift: str = Field(default="NaN")
     Shovel: str = Field(default="NaN")
     ShovelModel: str = Field(default="NaN")
-    Equipment: str  # Campo obligatorio
+    Equipment: str  # required field
     TruckFleet: str = Field(default="NaN")
     LoadingZone: str = Field(default="NaN")
     Material: str = Field(default="NaN")
@@ -44,11 +44,23 @@ class CycleSchema(BaseModel):
     L_UnloadingEnd: datetime = None
     DistanceEmpty: float = Field(default=0.0)
     DistanceLoaded: float = Field(default=0.0)
-    G_Latitude: float = Field(default=0.0)  # Campo obligatorio
-    G_Longitude: float = Field(default=0.0)  # Campo obligatorio
-    G_Elevation: float = Field(default=0.0)  # Campo obligatorio
-    D_Latitude: float = Field(default=0.0)  # Campo obligatorio
-    D_Longitude: float = Field(default=0.0)  # Campo obligatorio
-    D_Elevation: float = Field(default=0.0)  # Campo obligatorio
+    G_Latitude: float = Field(
+        default=0.0
+    )  # local coordinates in milliarcseconds using the WGS84 system, required field
+    G_Longitude: float = Field(
+        default=0.0
+    )  # local coordinates in milliarcseconds, required field
+    G_Elevation: float = Field(
+        default=0.0
+    )  # local coordinates in milliarcseconds, required field
+    D_Latitude: float = Field(
+        default=0.0
+    )  # local coordinates in milliarcseconds, required field
+    D_Longitude: float = Field(
+        default=0.0
+    )  # local coordinates in milliarcseconds, required field
+    D_Elevation: float = Field(
+        default=0.0
+    )  # local coordinates in milliarcseconds, required field
     EquivalentDistance: float = Field(default=0.0)
     TotalCycleTime: float = Field(default=0.0)

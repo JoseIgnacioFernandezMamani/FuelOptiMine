@@ -1,5 +1,4 @@
-from etl_core.load.utils.config import CH_CONFIG, DATASET_CONFIG
-import clickhouse_connect
+from etl_core.load.utils.config import CH_CONFIG, DATASET_CONFIG, create_client
 import time
 import polars as pl
 import psutil
@@ -9,12 +8,12 @@ from typing import Dict, Any
 
 class ClickHouseLoader:
     """
-    Loader optimizado para carga masiva en ClickHouse con:
-    - Protocolo nativo
-    - Streaming Arrow
-    - Batch sizing automático
-    - Manejo de esquemas y tipos
-    - Métricas de rendimiento
+    Optimized loader for bulk loading into ClickHouse with:
+    - Native protocol
+    - Arrow streaming
+    - Automatic batch sizing
+    - Schema and type handling
+    - Performance metrics
     """
 
     def __init__(self, **params):
@@ -42,36 +41,24 @@ class ClickHouseLoader:
         self.close()
 
     def connect(self):
-        """Conexión con reintento exponencial"""
-        for attempt in range(3):
-            try:
-                self.client = clickhouse_connect.get_client(**self.params)
-                self.client.command("SELECT 1")  # Test de conexión
-                self.logger.info("Conexión exitosa a ClickHouse")
-                return
-            except Exception as e:
-                wait_time = 2**attempt
-                self.logger.warning(
-                    f"Intento {attempt+1} fallido. Reintentando en {wait_time}s... Error: {str(e)}"
-                )
-                time.sleep(wait_time)
-        raise ConnectionError("No se pudo conectar a ClickHouse después de 3 intentos")
+        """Connects to the ClickHouse client using configured parameters"""
+        self.client = create_client(params=self.params, logger=self.logger)
 
     def load(self, table_name: str, df: pl.DataFrame):
-        """Carga optimizada de DataFrame en tabla específica"""
+        """Optimized DataFrame loading into specific table"""
         if df.is_empty():
             self.logger.warning(f"Intento de carga vacía en tabla {table_name}")
             return
 
         start_time = time.monotonic()
 
-        # 1. Optimización de tipos
+        # 1. Type optimization
         df = self.optimize_types(df)
 
-        # 2. Cálculo de batch size dinámico
+        # 2. Dynamic batch size calculation
         batch_size = self.calculate_batch_size(df)
 
-        # 3. Carga por streaming Arrow
+        # 3. Load via Arrow streaming
         try:
             self.client.insert_arrow(
                 table=table_name,
@@ -82,7 +69,7 @@ class ClickHouseLoader:
             self.logger.exception(f"Error cargando datos en {table_name}: {str(e)}")
             raise
 
-        # 5. Actualización de métricas
+        # 5. Metrics update
         duration = time.monotonic() - start_time
         self.update_metrics(len(df), duration, table_name)
 
@@ -92,8 +79,8 @@ class ClickHouseLoader:
         return True
 
     def load_dataset(self, dataset_name: str, df: pl.DataFrame):
-        """Carga un DataFrame en su tabla correspondiente usando nombre de dataset"""
-        # Normalizar nombre del dataset
+        """Loads a DataFrame into its corresponding table using the dataset name"""
+        # Normalize dataset name
         normalized_name = self.DATASET_NAME_MAPPING.get(dataset_name, dataset_name)
 
         if normalized_name not in DATASET_CONFIG:
@@ -106,7 +93,7 @@ class ClickHouseLoader:
         return self.load(table_name, df)
 
     def optimize_types(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Optimiza tipos de datos para ClickHouse"""
+        """Optimizes data types for ClickHouse"""
         conversions = []
         for col, dtype in df.schema.items():
             if dtype == pl.Boolean:
@@ -120,7 +107,7 @@ class ClickHouseLoader:
         return df.with_columns(conversions) if conversions else df
 
     def calculate_batch_size(self, df: pl.DataFrame) -> int:
-        """Calcula tamaño de lote basado en memoria libre y tamaño de datos"""
+        """Calculates batch size based on free memory and data size"""
         try:
             free_mem = psutil.virtual_memory().available / (1024**2)  # MB
             df_size = df.estimated_size() / (1024**2)  # MB
@@ -145,11 +132,11 @@ class ClickHouseLoader:
             return 10000
 
     def update_metrics(self, rows: int, duration: float, table_name: str):
-        """Actualiza estadísticas de rendimiento"""
+        """Updates performance statistics"""
         self.metrics["total_rows"] += rows
         self.metrics["last_duration"] = duration
 
-        # Registrar por dataset
+        # Register by dataset
         dataset_name = next(
             (
                 name
@@ -173,5 +160,5 @@ class ClickHouseLoader:
             self.logger.info("Conexión a ClickHouse cerrada")
 
     def get_metrics(self) -> Dict[str, Any]:
-        """Devuelve métricas de rendimiento acumuladas"""
+        """Returns accumulated performance metrics"""
         return self.metrics

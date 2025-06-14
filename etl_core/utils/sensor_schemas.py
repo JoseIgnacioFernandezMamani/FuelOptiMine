@@ -1,4 +1,3 @@
-# transform/implementation/sensor/schema.py
 from datetime import datetime, date
 from pydantic import BaseModel, Field
 
@@ -9,11 +8,11 @@ class SensorSchema(BaseModel):
     google maps: (-21.102413333, -67.21) -> (lat, lon), Nota: nunca redondear los datos, siempre usar el valor completo del resultado
     """
 
-    ShiftDate: date  # campo obligatorio
+    ShiftDate: date  # required field
     Shift: str = Field(default="NaN")
-    TimeStamp: datetime  # campo obligatorio
+    TimeStamp: datetime  # required field
     RecordDuration: float = Field(default=0.0, ge=0)
-    Equipment: str  # campo obligatorio
+    Equipment: str  # required field
     TruckFleet: str = Field(default="NaN")
     FuelLevel: float = Field(default=0.0, ge=0)
     FuelLevelLiters: float = Field(default=0.0, ge=0)
@@ -21,6 +20,6 @@ class SensorSchema(BaseModel):
     Speed: float = Field(default=0.0, ge=0)
     RPM: float = Field(default=0.0, ge=0)
     Ralenti: str = Field(default="NaN")
-    Latitude: float  # coordenadas locales milliarcseconds usando el sistema WGS84
-    Longitude: float  # coordenadas locales milliarcseconds
-    Elevation: float  # coordenadas locales milliarcseconds
+    Latitude: float  # local coordinates in milliarcseconds using the WGS84 system, required field
+    Longitude: float  # local coordinates in milliarcseconds, required field
+    Elevation: float  # local coordinates in milliarcseconds, required field

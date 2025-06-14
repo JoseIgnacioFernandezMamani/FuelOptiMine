@@ -1,15 +1,13 @@
-from etl_core.load.utils.config import CH_CONFIG, DATASET_CONFIG
+from etl_core.load.utils.config import CH_CONFIG, DATASET_CONFIG, create_client
 from etl_core.load.utils.schema_handler import (
     import_schema_class,
     pydantic_to_clickhouse,
 )
-import clickhouse_connect
 import logging
-import time
 
 
 class ClickHouseInitializer:
-    """Inicializador completo de base de datos y tablas en ClickHouse"""
+    """Complete initializer for database and tables in ClickHouse"""
 
     def __init__(self, **params):
         self.client = None
@@ -17,36 +15,26 @@ class ClickHouseInitializer:
         self.logger = logging.getLogger("ClickHouseInitializer")
 
     def __enter__(self):
+        """Executed when entering the with block"""
         self.connect()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Executed when exiting the with block"""
         self.close()
 
     def connect(self):
-        """Establece conexión con reintento exponencial"""
-        for attempt in range(3):
-            try:
-                self.client = clickhouse_connect.get_client(**self.params)
-                self.client.command("SELECT 1")  # Test de conexión
-                self.logger.info("Conexión exitosa a ClickHouse")
-                return
-            except Exception as e:
-                wait_time = 2**attempt
-                self.logger.warning(
-                    f"Intento {attempt+1} fallido. Reintentando en {wait_time}s..."
-                )
-                time.sleep(wait_time)
-        raise ConnectionError("No se pudo conectar a ClickHouse después de 3 intentos")
+        """Usa la utilidad reutilizable"""
+        self.client = create_client(params=self.params, logger=self.logger)
 
     def create_database(self):
-        """Crea la base de datos si no existe"""
+        """Creates the database if it does not exist"""
         db_name = self.params["database"]
         self.client.command(f"CREATE DATABASE IF NOT EXISTS {db_name}")
         self.logger.info(f"Base de datos '{db_name}' creada/verificada")
 
     def create_table(self, dataset_name: str):
-        """Crea una tabla para un dataset específico"""
+        """Creates a table for a specific dataset"""
         if dataset_name not in DATASET_CONFIG:
             self.logger.error(
                 f"Dataset '{dataset_name}' no encontrado en configuración"
@@ -72,10 +60,10 @@ class ClickHouseInitializer:
 
     def initialize_database(self, datasets=None):
         """
-        Inicializa toda la base de datos o datasets específicos
+        Initializes the entire database or specific datasets
 
         Args:
-            datasets: Lista de datasets a inicializar (None = todos)
+            datasets: List of datasets to initialize (None = all)
         """
         self.create_database()
 
@@ -88,6 +76,14 @@ class ClickHouseInitializer:
         self.logger.info("Base de datos inicializada exitosamente")
 
     def close(self):
+        """
+        Closes the connection to ClickHouse
+        """
         if self.client:
-            self.client.close()
-            self.logger.info("Conexión a ClickHouse cerrada")
+            try:
+                self.client.close()
+                self.logger.info("Conexión a ClickHouse cerrada")
+            except Exception as e:
+                self.logger.error(f"Error cerrando conexión: {str(e)}")
+            finally:
+                self.client = None

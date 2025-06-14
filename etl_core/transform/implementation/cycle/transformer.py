@@ -7,7 +7,14 @@ from datetime import datetime
 
 
 class CycleTransformer(BaseTransformer):
-    """Transformador para datos de ciclos de carga y transporte minero"""
+    """
+    Transformer for mining haulage and loading cycle data.
+    Actions:
+    data cleaning, remove null or inconsistent records
+    data type casting, convert to correct data types
+    column normalization, convert to correct units
+    integrity validation, remove duplicate data
+    """
 
     def __init__(self):
         super().__init__()
