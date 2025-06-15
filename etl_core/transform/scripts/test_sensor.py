@@ -1,8 +1,8 @@
 from etl_core.transform.implementation.sensor.transformer import SensorTransformer
 from etl_core.extract.implementations.local.csv_extractor import CSVExtractor
-from etl_core.extract.config.settings import DATA_DIR
 import sys
 import os
+import polars as pl
 
 
 def run_sensor_etl_pipeline():
@@ -16,95 +16,109 @@ def run_sensor_etl_pipeline():
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     )
 
-    print(f"🚚 Iniciando ETL para camión {truck_id} - {dataset_name} (Sensor Data)")
+    print(f"🚚 Starting ETL for truck {truck_id} - {dataset_name} (Sensor Data)")
 
     try:
-        # 1. Extracción de datos
-        print("\n🔍 Extrayendo datos desde CSV...")
+        # 1. Data extraction
+        print("\n🔍 Extracting data from CSV...")
         extractor = CSVExtractor(dataset_name, truck_id)
-
-        # Cargar datos y manejar posibles errores
         raw_data, metadata = extractor.load_data()
 
         if not raw_data or data_type not in raw_data:
             raise ValueError(
-                f"Datos de tipo '{data_type}' no encontrados o estructura inválida"
+                f"Data of type '{data_type}' not found or invalid structure"
             )
 
-        # Obtener DataFrame de Polars directamente
+        # Get Polars DataFrame directly
         df_raw = raw_data[data_type]
-        print(f"✅ Datos crudos cargados: {len(df_raw)} registros")
-        print("Esquema inicial:", df_raw.schema)
+        print(f"✅ Raw data loaded: {df_raw.height} records")
+        print("Initial schema:", df_raw.schema)
 
-        # 2. Transformación de datos
-        print("\n🔄 Procesando datos con SensorTransformer...")
+        # 2. Data transformation
+        print("\n🔄 Processing data with SensorTransformer...")
         transformer = SensorTransformer()
         df_clean = transformer.run_transform(df_raw)
 
         if df_clean is None or df_clean.is_empty():
-            raise RuntimeError("La transformación devolvió datos vacíos")
+            raise RuntimeError("Transformation returned empty data")
 
-        # 3. Verificación de nuevas columnas
-
-        """expected_columns = [
-            'slope_percent', 'fuel_consumption', 'idle_time',
-            'distance_traveled', 'efficiency_ratio', 'slope_impact'
+        # 3. Verify expected columns
+        expected_columns = [
+            "ShiftDate",
+            "Shift",
+            "TimeStamp",
+            "RecordDuration",
+            "Equipment",
+            "TruckFleet",
+            "FuelLevel",
+            "FuelLevelLiters",
+            "FuelGauge",
+            "Speed",
+            "RPM",
+            "Ralenti",
+            "Latitude",
+            "Longitude",
+            "Elevation",
         ]
-        missing_columns = [col for col in expected_columns if col not in df_clean.columns]
+
+        missing_columns = [
+            col for col in expected_columns if col not in df_clean.columns
+        ]
         if missing_columns:
-            raise ValueError(f"Columnas esperadas faltantes: {missing_columns}") 
+            raise ValueError(f"Missing expected columns: {missing_columns}")
+
+        # 4. Updated metrics report
+        print("\n📊 Final metrics:")
+        metrics = [
+            ("Initial records", "initial_records"),
+            ("After cleaning", "after_cleaning_records"),
+            ("After validation", "after_validation_records"),
+            ("After transformation", "after_transform_records"),
+            ("Null records removed", "removed_null_records"),
+            ("Duplicate records removed", "removed_duplicate_records"),
+            ("Invalid schema records", "invalid_schema_records"),
+            ("Outliers removed", "outliers_removed"),
+            ("Invalid geo records", "invalid_geo_records"),
+            ("Categorical empty fixed", "categorical_empty_fixed"),
+            ("Clean data percentage", "clean_data_percentage"),
+            ("Valid data percentage", "valid_data_percentage"),
+            ("Final data percentage", "final_data_percentage"),
+        ]
+
+        for name, key in metrics:
+            value = transformer.metrics.get(key, "N/A")
+            if isinstance(value, float):
+                print(f"- {name}: {value:.2f}%")
+            else:
+                print(f"- {name}: {value}")
+
+        # 5. Show transformed data sample
+        print("\n🔍 Transformed data sample (First 5 rows):")
+        sample_columns = [
+            "Equipment",
+            "TimeStamp",
+            "Latitude",
+            "Longitude",
+            "Elevation",
+            "FuelLevelLiters",
+            "Speed",
+            "Shift",
+            "Ralenti",
+        ]
+        print(df_clean.select(sample_columns).head(5))
+
+        # 6. Save results
+        """         
+        output_path = os.path.join(os.getcwd(), f"{truck_id}_sensor_transformed.csv")
+        df_clean.write_csv(output_path)
+        print(f"\n💾 Results saved to: {output_path}")
         """
 
-        # 4. Reporte de métricas actualizado
-        print("\n📊 Métricas finales:")
-        metrics = [
-            ("Registros iniciales", "initial_records"),
-            ("Registros limpios", "cleaned_records"),
-            ("Registros nulos removidos", "removed_null_records"),
-            ("Registros duplicados removidos", "removed_duplicate_records"),
-            ("Registros inválidos de esquema", "invalid_schema_records"),
-            ("Registros con combustible inválido", "invalid_fuel_records"),
-            ("Porcentaje limpio", "clean_data_percentage"),
-        ]
-
-        for nombre, clave in metrics:
-            valor = transformer.metrics.get(clave, "N/A")
-            if isinstance(valor, float):
-                print(f"- {nombre}: {valor:.2f}%")
-            else:
-                print(f"- {nombre}: {valor}")
-
-        # 5. Muestra de resultados con nuevas columnas
-        print("\n🔍 Muestra de datos transformados (Primeras 5 filas):")
-        sample_columns = [
-            "distance_traveled",
-            "consumption_rate",
-            "fuel_consumption",
-            "refuel_event",
-            "slope_percent",
-            "slope_impact",
-            "efficiency_ratio",
-        ]
-        print(df_clean.select(sample_columns).head(105))
-        df_clean.write_csv(
-            "/mnt/d/Develop/FuelOptiMine/frontend/web/app/output/T-211_sensor.csv"
-        )
-        # 6. Análisis adicional de las nuevas características
-
-        """ print("\n📈 Estadísticas clave de las nuevas columnas:")
-        stats = df_clean.select([
-            pl.col('fuel_consumption').mean().alias('consumo_promedio(l/h)'),
-            pl.col('efficiency_ratio').mean().alias('eficiencia_promedio(m/l)'),
-            pl.col('slope_impact').value_counts()
-        ])
-        print(stats) """
-
     except Exception as e:
-        print(f"\n❌ Error crítico en el pipeline: {str(e)}")
-        if hasattr(e, "__traceback__"):
-            import traceback
+        print(f"\n❌ Critical error in pipeline: {str(e)}")
+        import traceback
 
-            traceback.print_exc()
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

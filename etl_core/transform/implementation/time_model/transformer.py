@@ -5,154 +5,274 @@ from pydantic import BaseModel
 import polars as pl
 
 
+from typing import List, Type, Optional
+from etl_core.transform.core.base_transformer import BaseTransformer
+from etl_core.utils.time_model_schemas import TimeModelSchema
+from pydantic import BaseModel
+import polars as pl
+
+
 class TimeModelTransformer(BaseTransformer):
-    """Transformador para modelado temporal de operaciones mineras"""
+    """Optimized transformer for mining time model data using Polars expressions"""
 
     def __init__(self):
         super().__init__()
-        self._window_sizes = [60, 300, 900]  # Ventanas en segundos: 1, 5, 15 min
+        self.metrics.update(
+            {
+                "outliers_removed": 0,
+                "categorical_empty_fixed": 0,
+                "negative_durations_fixed": 0,
+                "duplicate_events_removed": 0,
+                "timestamp_sequence_errors": 0,
+                "invalid_status_combinations": 0,
+            }
+        )
 
     @property
     def mandatory_columns(self) -> List[str]:
-        return ["Equipment", "TimeStamp"]
+        """Dynamically get mandatory columns from Pydantic schema"""
+        return [
+            field_name
+            for field_name, field in TimeModelSchema.model_fields.items()
+            if field.is_required()
+        ]
 
     @property
     def schema_model(self) -> Type[BaseModel]:
+        """Pydantic schema for data validation"""
         return TimeModelSchema
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Ejecuta el pipeline de transformación temporal"""
-        try:
-            if df.is_empty():
-                return df
+    def transform(self, df: pl.DataFrame) -> Optional[pl.DataFrame]:
+        """Optimized transformation pipeline using expressions"""
 
-            # Preparación de datos temporal
-            processed_df = self._preprocess_data(df)
+        # 1. Collect all transformation expressions
+        categorical_exprs = self._get_categorical_normalization_exprs()
+        duration_validation_exprs = self._get_duration_validation_exprs()
+        status_normalization_exprs = self._get_status_normalization_exprs()
 
-            # Etapa 1: Características básicas de tiempo
-            stage1 = processed_df.with_columns(
-                [
-                    self._extract_time_features(),
-                    self._calculate_time_since_last_event(),
-                    self._calculate_operating_session(),
-                ]
-            )
-
-            # Etapa 2: Agregaciones temporales
-            stage2 = stage1.with_columns(
-                [
-                    *self._create_rolling_features("FuelLevelLiters"),
-                    *self._create_rolling_features("RPM"),
-                    self._calculate_time_based_efficiency(),
-                ]
-            )
-
-            # Etapa 3: Características para modelado
-            return stage2.with_columns(
-                [
-                    self._calculate_equipment_utilization(),
-                    self._predict_remaining_operating_time(),
-                    self._detect_temporal_anomalies(),
-                ]
-            )
-
-        except Exception as e:
-            raise RuntimeError(f"Error en modelado temporal: {str(e)}")
-
-    def _preprocess_data(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Prepara los datos para análisis temporal"""
-        return df.sort(["Equipment", "TimeStamp"]).with_columns(
-            [
-                pl.col("TimeStamp").dt.cast_time_unit("ms"),
-                pl.col("FuelLevelLiters").interpolate().over("Equipment"),
-            ]
+        # 2. Apply all transformations in a single step
+        df = df.with_columns(
+            categorical_exprs + duration_validation_exprs + status_normalization_exprs
         )
 
-    def _extract_time_features(self) -> pl.Expr:
-        """Extrae características temporales básicas"""
-        return pl.struct(
-            [
-                pl.col("TimeStamp").dt.hour().alias("hour"),
-                pl.col("TimeStamp").dt.minute().alias("minute"),
-                (pl.col("TimeStamp").dt.minute() // 15).alias("quarter_hour"),
-                pl.col("TimeStamp").dt.weekday().alias("weekday"),
-                pl.col("TimeStamp").dt.day().alias("day_of_month"),
-            ]
-        ).alias("time_features")
+        # 3. Count fixes for categorical values
+        self._count_categorical_fixes(df)
 
-    def _calculate_time_since_last_event(self) -> pl.Expr:
-        """Calcula tiempo desde último evento por tipo"""
-        return (
-            pl.col("TimeStamp")
-            .diff()
-            .over(["Equipment", "EventType"])
-            .dt.total_seconds()
-            .alias("time_since_last_event")
-        )
+        # 4. Count duration fixes
+        self._count_duration_fixes(df)
 
-    def _calculate_operating_session(self) -> pl.Expr:
-        """Identifica sesiones operativas continuas"""
-        return (
-            pl.when(pl.col("Status").is_in(["Operativo", "Producción"]))
-            .then(pl.col("time_since_last_event") < 300)
-            .otherwise(False)
-            .cumsum()
-            .over("Equipment")
-            .alias("operating_session")
-        )
+        # 5. Remove duplicates and validate sequences
+        df = self._remove_duplicate_events(df)
+        df = self._validate_timestamp_sequences(df)
 
-    def _create_rolling_features(self, metric: str) -> List[pl.Expr]:
-        """Crea características móviles para métricas clave"""
+        # 6. Apply filters and update metrics
+        df = self._apply_filters(df)
+
+        # 7. Calculate derived fields for time modeling
+        df = self._calculate_time_model_fields(df)
+
+        # 8. Update final metrics
+        self.metrics["after_transform_records"] = df.height
+        if self.metrics["initial_records"] > 0:
+            self.metrics["final_data_percentage"] = round(
+                (df.height / self.metrics["initial_records"]) * 100, 2
+            )
+
+        # 9. Sort by Equipment, ShiftDate, and TimeStamp for time model analysis
+        df = df.sort("Equipment", "ShiftDate", "TimeStamp")
+
+        return df
+
+    def _get_categorical_normalization_exprs(self) -> list[pl.Expr]:
+        """Expressions for normalizing categorical fields"""
+        categorical_columns = ["Shift", "TruckFleet", "Status", "Category", "Event"]
         return [
-            pl.col(metric)
-            .rolling_mean(window_size, min_periods=1)
-            .over("Equipment")
-            .alias(f"{metric}_rolling_{window_size}s")
-            for window_size in self._window_sizes
+            pl.when(
+                pl.col(col).is_null() | (pl.col(col) == "") | (pl.col(col) == "NaN")
+            )
+            .then(pl.lit("NaN"))
+            .otherwise(
+                pl.col(col).str.strip().str.to_uppercase()
+            )  # Clean and standardize
+            .alias(col)
+            for col in categorical_columns
         ]
 
-    def _calculate_time_based_efficiency(self) -> pl.Expr:
-        """Eficiencia operativa con ventana temporal"""
-        return (
-            pl.col("distance_traveled").rolling_sum(900)
-            / pl.col("FuelLevelLiters").rolling_sum(900).clip(lower_bound=0.1)
-        ).alias("efficiency_15min")
+    def _get_duration_validation_exprs(self) -> list[pl.Expr]:
+        """Expressions for validating record duration"""
+        return [
+            # Fix negative durations
+            pl.when(pl.col("RecordDuration") < 0)
+            .then(pl.lit(0.0))
+            .otherwise(pl.col("RecordDuration"))
+            .alias("RecordDuration"),
+            # Cap extremely long durations (more than 8 hours seems unrealistic for single event)
+            pl.when(pl.col("RecordDuration") > 480)  # 480 minutes = 8 hours
+            .then(pl.lit(480.0))
+            .otherwise(pl.col("RecordDuration"))
+            .alias("RecordDuration"),
+        ]
 
-    def _calculate_equipment_utilization(self) -> pl.Expr:
-        """Calcula utilización real del equipo"""
-        operating_time = (
-            pl.col("Status").is_in(["Producción", "Transporte"]).cast(pl.Int64)
-        )
-        return (operating_time.rolling_mean(3600).over("Equipment") * 100).alias(
-            "utilization_pct"
-        )
+    def _get_status_normalization_exprs(self) -> list[pl.Expr]:
+        """Expressions for standardizing status and event combinations"""
+        return [
+            # Standardize common status values
+            pl.when(pl.col("Status").str.contains("(?i)working|operating|active"))
+            .then(pl.lit("WORKING"))
+            .when(pl.col("Status").str.contains("(?i)idle|waiting|standby"))
+            .then(pl.lit("IDLE"))
+            .when(pl.col("Status").str.contains("(?i)maintenance|repair|service"))
+            .then(pl.lit("MAINTENANCE"))
+            .when(pl.col("Status").str.contains("(?i)moving|traveling|transit"))
+            .then(pl.lit("MOVING"))
+            .when(pl.col("Status").str.contains("(?i)loading|dumping|spotting"))
+            .then(pl.lit("LOADING_DUMPING"))
+            .otherwise(pl.col("Status"))
+            .alias("Status"),
+            # Standardize category values
+            pl.when(pl.col("Category").str.contains("(?i)productive|production"))
+            .then(pl.lit("PRODUCTIVE"))
+            .when(pl.col("Category").str.contains("(?i)delay|downtime|non.productive"))
+            .then(pl.lit("NON_PRODUCTIVE"))
+            .when(pl.col("Category").str.contains("(?i)maintenance|scheduled"))
+            .then(pl.lit("MAINTENANCE"))
+            .otherwise(pl.col("Category"))
+            .alias("Category"),
+        ]
 
-    def _predict_remaining_operating_time(self) -> pl.Expr:
-        """Predice tiempo restante de operación basado en consumo"""
-        return (
-            (
-                pl.col("FuelLevelLiters")
-                / pl.col("FuelLevelLiters")
-                .diff()
-                .abs()
-                .rolling_mean(300)
+    def _count_categorical_fixes(self, df: pl.DataFrame) -> None:
+        """Count fixed empty values in categorical fields"""
+        categorical_columns = ["Shift", "TruckFleet", "Status", "Category", "Event"]
+        for col in categorical_columns:
+            if col in df.columns:
+                null_count = df.filter(
+                    pl.col(col).is_null() | (pl.col(col) == "") | (pl.col(col) == "NaN")
+                ).height
+                self.metrics["categorical_empty_fixed"] += null_count
+
+    def _count_duration_fixes(self, df: pl.DataFrame) -> None:
+        """Count negative duration values that were fixed"""
+        if "RecordDuration" in df.columns:
+            negative_count = df.filter(pl.col("RecordDuration") < 0).height
+            self.metrics["negative_durations_fixed"] += negative_count
+
+    def _remove_duplicate_events(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Remove duplicate events for same equipment at same timestamp"""
+        before_duplicates = df.height
+
+        # Remove exact duplicates first
+        df = df.unique()
+
+        # Remove duplicates based on Equipment + TimeStamp, keeping the one with longest duration
+        df = df.with_row_count("row_id").sort("RecordDuration", descending=True)
+        df = df.unique(subset=["Equipment", "TimeStamp"], keep="first")
+        df = df.drop("row_id")
+
+        self.metrics["duplicate_events_removed"] = before_duplicates - df.height
+        return df
+
+    def _validate_timestamp_sequences(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Validate timestamp sequences per equipment"""
+        before_validation = df.height
+
+        # Add a flag for timestamp sequence validation
+        df = df.with_columns(
+            [
+                # Check if timestamps are in logical sequence per equipment
+                pl.col("TimeStamp")
+                .sort()
                 .over("Equipment")
-            )
-            .clip(lower_bound=0)
-            .alias("predicted_remaining_time")
+                .alias("expected_timestamp"),
+                pl.col("TimeStamp").alias("actual_timestamp"),
+            ]
         )
 
-    def _detect_temporal_anomalies(self) -> pl.Expr:
-        """Detección de anomalías temporales"""
-        return pl.when(
-            (pl.col("RPM_rolling_60s") < 500)
-            & (pl.col("utilization_pct") > 80)
-            .then("Low RPM High Utilization")
-            .when(
-                (pl.col("FuelLevelLiters_rolling_300s") < 0.1)
-                & (pl.col("distance_traveled") > 100)
-                .then("Fuel Anomaly")
-                .otherwise("Normal")
-                .alias("temporal_anomaly")
+        # For now, just count potential issues but don't filter
+        # In a real scenario, you might want to implement more sophisticated validation
+        timestamp_issues = df.filter(
+            pl.col("actual_timestamp") != pl.col("expected_timestamp")
+        ).height
+
+        self.metrics["timestamp_sequence_errors"] = timestamp_issues
+
+        # Clean up temporary columns
+        df = df.drop(["expected_timestamp", "actual_timestamp"])
+
+        return df
+
+    def _apply_filters(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Apply filters for data quality"""
+
+        # Filter out records with invalid status-category combinations
+        before_status_filter = df.height
+
+        # Define valid combinations (adjust based on your business rules)
+        invalid_combinations = (
+            # WORKING status should not have NON_PRODUCTIVE category
+            ((pl.col("Status") == "WORKING") & (pl.col("Category") == "NON_PRODUCTIVE"))
+            |
+            # MAINTENANCE status should have MAINTENANCE category
+            (
+                (pl.col("Status") == "MAINTENANCE")
+                & (pl.col("Category") != "MAINTENANCE")
             )
+            |
+            # Zero duration records are usually not meaningful for time modeling
+            (pl.col("RecordDuration") == 0)
+        )
+
+        df = df.filter(~invalid_combinations)
+        self.metrics["invalid_status_combinations"] = before_status_filter - df.height
+
+        return df
+
+    def _calculate_time_model_fields(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Calculate derived fields for time model analysis"""
+        return df.with_columns(
+            [
+                # Calculate cumulative time per equipment per shift
+                pl.col("RecordDuration")
+                .cumsum()
+                .over(["Equipment", "ShiftDate"])
+                .alias("CumulativeTime"),
+                # Calculate time since last event per equipment
+                (
+                    pl.col("TimeStamp")
+                    - pl.col("TimeStamp").shift(1).over(["Equipment", "ShiftDate"])
+                )
+                .dt.total_minutes()
+                .alias("TimeSinceLastEvent"),
+                # Calculate percentage of shift time
+                (
+                    pl.col("RecordDuration")
+                    / pl.col("RecordDuration").sum().over(["Equipment", "ShiftDate"])
+                    * 100
+                ).alias("ShiftTimePercentage"),
+                # Add shift hour for time pattern analysis
+                pl.col("TimeStamp").dt.hour().alias("ShiftHour"),
+                # Add day of week for pattern analysis
+                pl.col("TimeStamp").dt.weekday().alias("DayOfWeek"),
+                # Create status transition flag
+                (
+                    pl.col("Status")
+                    != pl.col("Status").shift(1).over(["Equipment", "ShiftDate"])
+                ).alias("StatusTransition"),
+                # Calculate productivity score (simple example)
+                pl.when(pl.col("Category") == "PRODUCTIVE")
+                .then(pl.col("RecordDuration"))
+                .otherwise(pl.lit(0.0))
+                .alias("ProductiveTime"),
+                # Calculate delay time
+                pl.when(pl.col("Category") == "NON_PRODUCTIVE")
+                .then(pl.col("RecordDuration"))
+                .otherwise(pl.lit(0.0))
+                .alias("DelayTime"),
+                # Add equipment utilization flag
+                pl.when(
+                    pl.col("Status").is_in(["WORKING", "LOADING_DUMPING", "MOVING"])
+                )
+                .then(pl.lit(True))
+                .otherwise(pl.lit(False))
+                .alias("IsUtilized"),
+            ]
         )

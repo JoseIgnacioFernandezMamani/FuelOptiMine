@@ -1,25 +1,30 @@
+from typing import List, Type, Optional
 from etl_core.transform.core.base_transformer import BaseTransformer
 from etl_core.utils.sensor_schemas import SensorSchema
-from typing import List, Type
+from etl_core.transform.utils.unit_converter import (
+    get_coordinate_conversion_exprs,
+    get_geo_validation_expr,
+)
 from pydantic import BaseModel
 import polars as pl
 
 
 class SensorTransformer(BaseTransformer):
-    """
-    Transformer for data from fuel level, rpm and speed sensors.
-    Actions:
-    data cleaning, remove null or inconsistent records
-    data type casting, convert to correct data types
-    column normalization, convert to correct units
-    integrity validation, remove duplicate data
-    """
+    """Optimized transformer for sensor data using Polars expressions"""
 
     def __init__(self):
         super().__init__()
+        self.metrics.update(
+            {
+                "outliers_removed": 0,
+                "invalid_geo_records": 0,
+                "categorical_empty_fixed": 0,
+            }
+        )
 
     @property
     def mandatory_columns(self) -> List[str]:
+        """Dynamically get mandatory columns from Pydantic schema"""
         return [
             field_name
             for field_name, field in SensorSchema.model_fields.items()
@@ -28,156 +33,86 @@ class SensorTransformer(BaseTransformer):
 
     @property
     def schema_model(self) -> Type[BaseModel]:
+        """Pydantic schema for data validation"""
         return SensorSchema
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Specific transformations for sensor data"""
-        try:
-            # Verificar si hay datos para procesar
-            if df.is_empty():
-                return df
+    def transform(self, df: pl.DataFrame) -> Optional[pl.DataFrame]:
+        """Optimized transformation pipeline using expressions"""
 
-            # Validación y preprocesamiento
-            processed_df = df.sort(["Equipment", "TimeStamp"])
+        # 1. Collect all transformation expressions
+        conversion_exprs = get_coordinate_conversion_exprs()
+        categorical_exprs = self._get_categorical_normalization_exprs()
+        outlier_exprs = self._get_outlier_handling_exprs()
+        geo_validation_expr = get_geo_validation_expr()
 
-            # Etapa 1: Cálculos básicos
-            stage1 = processed_df.with_columns(
-                [
-                    self._calculate_distance_traveled(),
-                    self._calculate_fuel_consumption_rate("hours"),
-                    self._calculate_cumulative_fuel_consumption(),
-                    self._calculate_refuel_events(),
-                ]
+        # 2. Apply all transformations in a single step
+        df = df.with_columns(conversion_exprs + categorical_exprs + outlier_exprs)
+
+        # 3. Count fixed categorical values
+        self._count_categorical_fixes(df)
+
+        # 4. Apply filters and update metrics
+        df = self._apply_filters(df, geo_validation_expr)
+
+        # 5. Update final metrics
+        self.metrics["after_transform_records"] = df.height
+        if self.metrics["initial_records"] > 0:
+            self.metrics["final_data_percentage"] = round(
+                (df.height / self.metrics["initial_records"]) * 100, 2
             )
 
-            # Etapa 2: Cálculos dependientes
-            stage2 = stage1.with_columns(
-                [self._calculate_slope_percent(), self._calculate_efficiency_ratio()]
-            )
+        # finally, sort by ShiftDate and TimeStamp
+        df = df.sort("ShiftDate", "TimeStamp")
 
-            # Etapa 3: Clasificaciones
-            return stage2.with_columns([self._categorize_slope_impact()])
+        return df
 
-        except Exception as e:
-            raise ValueError(f"Unidad de tiempo no válida:")
+    def _get_categorical_normalization_exprs(self) -> list[pl.Expr]:
+        """Expressions for normalizing categorical fields"""
+        categorical_columns = ["Shift", "FuelGauge", "Ralenti", "TruckFleet"]
+        return [
+            pl.when(pl.col(col).is_null() | (pl.col(col) == ""))
+            .then(pl.lit("NoData"))
+            .otherwise(pl.col(col))
+            .alias(col)
+            for col in categorical_columns
+        ]
 
-    def _calculate_distance_traveled(self) -> pl.Expr:
-        """Distancia euclidiana 3D entre puntos consecutivos en sistema local (milímetros → metros)"""
-        # Convertir de milímetros a metros (dividir entre 1000)
-        x = pl.col("Latitude") / 1000
-        y = pl.col("Longitude") / 1000
-        z = pl.col("Elevation") / 1000
+    def _get_outlier_handling_exprs(self) -> list[pl.Expr]:
+        """Expressions for handling outlier values (convert to null)"""
+        return [
+            pl.when(pl.col("FuelLevelLiters") > 5000)
+            .then(None)
+            .otherwise(pl.col("FuelLevelLiters"))
+            .alias("FuelLevelLiters"),
+            pl.when(pl.col("Speed") > 150)
+            .then(None)
+            .otherwise(pl.col("Speed"))
+            .alias("Speed"),
+        ]
 
-        # Diferencias entre registros consecutivos por equipo
-        dx = x.diff(1).over("Equipment")
-        dy = y.diff(1).over("Equipment")
-        dz = z.diff(1).over("Equipment")
+    def _count_categorical_fixes(self, df: pl.DataFrame) -> None:
+        """Count fixed empty values in categorical fields"""
+        for col in ["Shift", "FuelGauge", "Ralenti", "TruckFleet"]:
+            if col in df.columns:
+                null_count = df.filter(
+                    pl.col(col).is_null() | (pl.col(col) == "")
+                ).height
+                self.metrics["categorical_empty_fixed"] += null_count
 
-        # Distancia 3D en metros
-        distance = (dx.pow(2) + dy.pow(2) + dz.pow(2)).sqrt()
-
-        return distance.fill_null(0).alias("distance_traveled")
-
-    def _calculate_fuel_consumption_rate(self, time_unit: str = "hour") -> pl.Expr:
-        """Consumo entre registros consecutivos (litros/hora)"""
-
-        time_factors = {
-            "seconds": 1,
-            "minutes": 60,
-            "hours": 3600,
-            "days": 86400,
-            "weeks": 604800,
-            "months": 2592000,
-        }
-
-        if time_unit not in time_factors:
-            raise ValueError(
-                f"Unidad de tiempo no válida: {time_unit}. Debe ser una de {list(time_factors.keys())}."
-            )
-
-        factor = time_factors[time_unit.lower()]
-
-        time_diff = (
-            (
-                pl.col("TimeStamp").diff(1).over("Equipment").dt.total_seconds()
-                / factor
-            )  # calculo de diferencia de tiempo en horas
-            .fill_null(0)
-            .clip(lower_bound=0.1)
+    def _apply_filters(
+        self, df: pl.DataFrame, geo_validation_expr: pl.Expr
+    ) -> pl.DataFrame:
+        """Apply all filters and update metrics"""
+        # Filter outliers (values converted to null)
+        before_outliers = df.height
+        df = df.filter(
+            pl.col("FuelLevelLiters").is_not_null() & pl.col("Speed").is_not_null()
         )
+        self.metrics["outliers_removed"] = before_outliers - df.height
 
-        fuel_diff = pl.col("FuelLevelLiters").diff(1).over("Equipment")
+        # Filter invalid geo records
+        before_geo = df.height
+        df = df.filter(geo_validation_expr)
+        self.metrics["invalid_geo_records"] = before_geo - df.height
 
-        return (
-            pl.when(fuel_diff < 0)
-            .then(-fuel_diff / time_diff)
-            .otherwise(0)
-            .fill_null(0)
-            .alias("consumption_rate")  # l/h
-        )
-
-    def _calculate_cumulative_fuel_consumption(self) -> pl.Expr:
-        """Consumo historico de combustible"""
-        fuel_diff = pl.col("FuelLevelLiters").diff(1).over("Equipment")
-
-        return (
-            pl.when(fuel_diff < 0)
-            .then(-fuel_diff)
-            .otherwise(0)
-            .fill_null(0)
-            .alias("fuel_consumption")
-        )
-
-    def _calculate_refuel_events(self, Threshold: int = 100) -> pl.Expr:
-        """Detecta saltos significativos hacia arriba en el combustible (recargas)"""
-        fuel_diff = pl.col("FuelLevelLiters").diff(1).over("Equipment")
-
-        return (
-            pl.when(fuel_diff > Threshold)
-            .then(pl.lit(True))
-            .otherwise(pl.lit(False))
-            .alias("refuel_event")
-        )
-
-    def _calculate_slope_percent(self) -> pl.Expr:
-        """Cálculo vectorizado de pendiente usando expresiones de Polars"""
-        return (
-            (
-                pl.col("Elevation").diff(1).over("Equipment")
-                / (
-                    (
-                        pl.col("Latitude").diff(1).over("Equipment") ** 2
-                        + pl.col("Longitude").diff(1).over("Equipment") ** 2
-                    ).sqrt()
-                    + 1e-9
-                )
-                * 100
-            )
-            .fill_nan(0)
-            .alias("slope_percent")
-        )
-
-    def _categorize_slope_impact(self) -> pl.Expr:
-        """Clasificación de impacto de pendiente"""
-        slope_abs = pl.col("slope_percent").abs()
-        return (
-            pl.when(slope_abs < 5)
-            .then(pl.lit("Low"))
-            .when((slope_abs >= 5) & (slope_abs < 10))
-            .then(pl.lit("Medium"))
-            .otherwise(pl.lit("High"))
-            .alias("slope_impact")
-        )
-
-    def _calculate_efficiency_ratio(self) -> pl.Expr:
-        """Calcula la eficiencia combustible-distancia"""
-        return (
-            (
-                pl.col("distance_traveled")
-                / pl.col("fuel_consumption").clip(
-                    lower_bound=0.1
-                )  # Evitar división por cero
-            )
-            .fill_null(0)
-            .alias("efficiency_ratio")
-        )
+        return df

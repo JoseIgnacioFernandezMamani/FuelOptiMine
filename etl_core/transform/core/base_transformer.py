@@ -23,12 +23,16 @@ class BaseTransformer(ABC):
         # 5. Enrichment: add metadata and metrics
         self.metrics = {
             "initial_records": 0,
-            "cleaned_records": 0,
+            "after_cleaning_records": 0,
+            "after_validation_records": 0,
+            "after_transform_records": 0,
             "removed_empty_records": 0,
             "removed_null_records": 0,
             "removed_duplicate_records": 0,
             "invalid_schema_records": 0,
             "clean_data_percentage": 0.0,
+            "valid_data_percentage": 0.0,
+            "final_data_percentage": 0.0,
         }
 
     """Abstract methods and common properties that must be implemented by subclasses"""
@@ -50,13 +54,14 @@ class BaseTransformer(ABC):
         """Abstract method for data transformation"""
         pass
 
-    # 1. data cleaning, remove null or inconsistent records and 4. 4. integrity validation, remove duplicate data
+    # 4. integrity validation
     def _validate_mandatory_columns(self, df: pl.DataFrame) -> None:
         """Validate mandatory columns"""
         missing = [col for col in self.mandatory_columns if col not in df.columns]
         if missing:
             raise ValueError(f"Columnas críticas faltantes: {missing}")
 
+    # 1. data cleaning, remove null or inconsistent records and
     def common_clean(self, df: pl.DataFrame) -> pl.DataFrame:
         """Optimized common cleaning with accurate metrics"""
         # 1. Validate mandatory columns
@@ -69,6 +74,13 @@ class BaseTransformer(ABC):
         # 3. Safely convert all data to string
         df = df.cast({col: pl.String for col in df.columns})
 
+        # count empty records before cleaning
+        empty_count = df.filter(
+            pl.any_horizontal(pl.col("*").is_null() | (pl.col("*") == ""))
+        ).height
+        self.metrics["removed_empty_records"] = empty_count
+
+        # replace null or "null" values in all columns
         df = df.with_columns(
             pl.all().map_elements(
                 lambda x: (
@@ -80,30 +92,30 @@ class BaseTransformer(ABC):
             )
         )
 
-        # 3. Remove records with null values in mandatory columns
+        # 4. Remove records with null values in mandatory columns
         df_clean = df.drop_nulls(subset=self.mandatory_columns)
         self.metrics["removed_null_records"] = initial_count - len(df_clean)
 
-        # 4. Remove temporary duplicates (if the column exists)
+        # 5. Remove temporary duplicates (if the column exists)
         ts_duplicates = 0
         if "TimeStamp" in df_clean.columns:
             before_ts = len(df_clean)
             df_clean = df_clean.unique(subset=["TimeStamp"], keep="first")
             ts_duplicates = before_ts - len(df_clean)
 
-        # 5. Remove full duplicates
+        # 6. Remove full duplicates
         before_full = len(df_clean)
         df_clean = df_clean.unique()
         full_duplicates = before_full - len(df_clean)
 
-        # 6. Calculate metrics
+        # 7. Update metrics
         self.metrics["removed_duplicate_records"] = ts_duplicates + full_duplicates
-        self.metrics["cleaned_records"] = len(df_clean)
+        self.metrics["after_cleaning_records"] = len(df_clean)
 
-        # 7. Calculate cleaning percentage
+        # 8. Calcular porcentaje de limpieza
         if initial_count > 0:
             self.metrics["clean_data_percentage"] = round(
-                (self.metrics["cleaned_records"] / initial_count) * 100, 2
+                (self.metrics["after_cleaning_records"] / initial_count) * 100, 2
             )
 
         return df_clean
@@ -111,6 +123,7 @@ class BaseTransformer(ABC):
     def normalize_and_validate(self, df: pl.DataFrame) -> pl.DataFrame:
         """Normalize types and validate against the schema in a single step"""
         valid_rows = []
+        invalid_count = 0
 
         for row in df.iter_rows(named=True):
             try:
@@ -118,13 +131,29 @@ class BaseTransformer(ABC):
                 self.schema_model.model_validate(row_data)
                 valid_rows.append(row_data)
             except ValidationError:
-                self.metrics["invalid_schema_records"] += 1
+                invalid_count += 1
 
-        return pl.DataFrame(valid_rows)
+        # Update metrics
+        self.metrics["invalid_schema_records"] = invalid_count
+        df_valid = pl.DataFrame(valid_rows)
+        self.metrics["after_validation_records"] = len(df_valid)
+
+        # Calculate valid data percentage
+        if self.metrics["after_cleaning_records"] > 0:
+            self.metrics["valid_data_percentage"] = round(
+                (
+                    self.metrics["after_validation_records"]
+                    / self.metrics["after_cleaning_records"]
+                )
+                * 100,
+                2,
+            )
+
+        return df_valid
 
     # 3. column normalization, convert to correct units
     def _normalize_row(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """normalize a single row of data based on the schema model"""
+        """normalize"""
         normalized = {}
 
         # Iterar sobre (nombre_campo, FieldInfo)
@@ -139,15 +168,13 @@ class BaseTransformer(ABC):
 
         return normalized
 
-    # 2. data type casting, convert to correct data types
+    # 2. data type casting, convert to correct data types and
     def _cast_value(self, field: FieldInfo, value: Any, field_name: str) -> Any:
-        """Optimized casting for Polars"""
-        # print(field, value)
+        """Casting for Polars"""
         try:
             # If the value is null and the field has a default
             if value is None and not field.is_required():
                 return field.get_default()
-
             if field.annotation == date:
                 return datetime.strptime(value, "%Y-%m-%d").date()
             elif field.annotation == datetime:
@@ -162,41 +189,74 @@ class BaseTransformer(ABC):
             elif field.annotation == str:
                 return str(value)
             elif field.annotation == bool:
-                return bool(value)
+                if isinstance(value, str):
+                    value = value.strip().lower()
+                    if value in ["true", "1", "yes", "y", "t"]:
+                        return True
+                    elif value in ["false", "0", "no", "n", "f"]:
+                        return False
+                    else:
+                        raise ValueError(f"Valor booleano no válido: {value}")
+                else:
+                    return bool(value)
         except (TypeError, ValueError) as e:
             print(f"⚠️ [ERROR] Campo: {field_name} | Valor: {value} | Error: {str(e)}")
             return field.default
 
-    def _update_final_metrics(self, final_count: int):
-        """Update final metrics"""
-        self.metrics["cleaned_records"] = final_count
-        if self.metrics["initial_records"] > 0:
-            self.metrics["clean_data_percentage"] = round(
-                (final_count / self.metrics["initial_records"]) * 100, 2
-            )
-
     def run_transform(self, df: pl.DataFrame) -> Optional[pl.DataFrame]:
-        """Optimized full pipeline"""
+        """Pipeline completo optimizado"""
         try:
             if df.is_empty():
-                print("DataFrame de entrada vacío")
+                print("Empty input DataFrame")
                 return None
 
+            # initialize cleaning metrics
             df_clean = self.common_clean(df)
-            print(f"Datos después de limpieza: {len(df_clean)} registros")
+            print(
+                f"Datos después de limpieza: {self.metrics['after_cleaning_records']} registros"
+            )
 
+            # validate
             df_normalized = self.normalize_and_validate(df_clean)
-            print(f"Datos después de normalización: {len(df_normalized)} registros")
+            print(
+                f"registros validos: {self.metrics["after_validation_records"]} registros"
+            )
+            print(
+                f"registros invalidos: {self.metrics['invalid_schema_records']} registros"
+            )
 
+            # transform
             df_transformed = self.transform(df_normalized)
-            print(f"Datos después de transformación: {len(df_transformed)} registros")
+            final_count = len(df_transformed) if df_transformed.is_empty() else 0
+            self.metrics["after_transform_records"] = final_count
 
-            # self._update_final_metrics(len(df_transformed) if df_transformed else 0)
+            # calculate final data percentage
+            if self.metrics["initial_records"] > 0:
+                self.metrics["final_data_percentage"] = round(
+                    (
+                        self.metrics["after_transform_records"]
+                        / self.metrics["initial_records"]
+                    )
+                    * 100,
+                    2,
+                )
+
+            print(
+                f"Registros finales: {self.metrics['after_transform_records']} registros"
+            )
+            print(
+                f"Porcentaje de datos finales: {self.metrics['final_data_percentage']}%"
+            )
+
             return df_transformed
 
         except Exception as e:
             import traceback
 
             traceback.print_exc()
-            print(f"Error crítico en transformación: {str(e)}")
+            print(f"Error during transformation: {str(e)}")
+            print(f"Current metrics: {self.metrics}")
+            print(
+                f"Dataframe schema: {df.schema if df is not None else 'No dataframe'}"
+            )
             return None

@@ -1,13 +1,15 @@
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import date, datetime
 
 
 class FuelSupplySchema(BaseModel):
-    """Esquema para datos de despacho minero"""
+    """Pydantic schema for fuel supply data validation"""
 
-    # Todos los campos son obligatorios
-    Veh: str
-    Descripcion: str
-    fin_desp: datetime
-    volumCorregido: float
-    Origin: str
+    Origin: str  # required field
+    ShiftDate: date  # required field
+    TimeStamp: datetime  # required field
+    Equipment: str  # required field
+    TruckFleet: str = Field(default="NaN")
+    FuelLevelLiters: float  # required field
+    Shift: str = Field(default="NaN")
+    FuelLevel: float = Field(default=0.0, ge=0)

@@ -21,7 +21,7 @@ from etl_core.extract.exceptions import (
     RecoverableExtractionError,
     CriticalExtractionError,
 )
-
+from etl_core.utils import TRUCK_SPECS
 from etl_core.extract.models.schemas import (
     COLUMN_MAPPING,
     DATASET_TYPES,
@@ -154,8 +154,13 @@ class CSVExtractor(IFileExtractor):
             ) from e
 
     def _load_fuel_supply(self) -> pl.DataFrame:
-        try:
+        """Load and transform fuel supply data from Excel files
 
+        Returns:
+            pl.DataFrame: Consolidated DataFrame with transformed fuel supply data
+        """
+        try:
+            # Generate file search pattern
             pattern = generate_file_patterns(
                 base_dir=self.base_dir,
                 dataset=self.dataset,
@@ -164,42 +169,122 @@ class CSVExtractor(IFileExtractor):
                 file_extension="*",
             )
 
-            dispatch_files = find_matching_files(pattern)
-            if not dispatch_files:
+            # Find matching files
+            supply_files = find_matching_files(pattern)
+            if not supply_files:
                 return pl.DataFrame()
 
             dfs = []
+            # Get truck capacity from specs
+            truck_capacity = TRUCK_SPECS.get(self.truck, {}).get("capacity", 3000)
 
-            for file in dispatch_files:
+            for file in supply_files:
                 try:
                     file_name = Path(file).stem
-                    origin = file_name.split("_")[1]
+                    parts = file_name.split("_")
+                    origin = parts[1] if len(parts) > 1 else "Unknown"
+
+                    # Read Excel file
                     pandas_df = pd.read_excel(
                         file,
                         header=0,
                         engine="openpyxl",
                         usecols=FUEL_SUPPLY,
-                        dtype=str,
                     )
 
-                    df = (
-                        pl.from_pandas(pandas_df)
-                        .filter(
-                            (pl.col("Descripcion").is_in(self.VALID_TRUCK_MODELS))
-                            & (
-                                pl.col("Veh").str.extract(r"^(\d{3})", 0)
-                                == self.truck_number
+                    # Convert to Polars DataFrame
+                    df = pl.from_pandas(pandas_df)
+
+                    # Handle timestamp column conversion
+                    time_col = "fin_desp"
+                    if time_col in df.columns:
+                        if df[time_col].dtype in (
+                            pl.Datetime,
+                            pl.Datetime("ms"),
+                            pl.Datetime("us"),
+                            pl.Datetime("ns"),
+                        ):
+                            df = df.rename({time_col: "TimeStamp"})
+                        else:
+                            df = df.with_columns(
+                                pl.col(time_col).cast(pl.Utf8),
+                                pl.col(time_col)
+                                .str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S%.f")
+                                .alias("TimeStamp"),
                             )
+                    else:
+                        # Create empty timestamp column if missing
+                        df = df.with_columns(
+                            pl.lit(None).alias("TimeStamp").cast(pl.Datetime)
                         )
-                        .with_columns(pl.lit(origin).alias("Origin").cast(pl.Utf8))
+
+                    # Apply transformations
+                    df = df.with_columns(
+                        # Add origin from file name
+                        pl.lit(origin).alias("Origin").cast(pl.Utf8),
+                        # Extract equipment number (first 3 digits)
+                        pl.col("Veh")
+                        .str.slice(0, 3)
+                        .map_elements(
+                            lambda x: f"T-{x}" if x else None, return_dtype=pl.Utf8
+                        )
+                        .alias("Equipment"),
+                        # Normalize truck model name
+                        pl.col("Descripcion")
+                        .str.replace_all(r"[\s-]+", "", literal=True)
+                        .alias("TruckFleet"),
+                        # Convert fuel volume to float
+                        pl.col("volumCorregido")
+                        .cast(pl.Float64, strict=False)
+                        .alias("FuelLevelLiters"),
                     )
+
+                    # Calculate derived fields
+                    df = df.with_columns(
+                        # Extract date from timestamp
+                        pl.col("TimeStamp").dt.date().alias("ShiftDate"),
+                        # Determine shift (Day/Night)
+                        pl.when(
+                            (pl.col("TimeStamp").dt.hour() >= 7)
+                            & (pl.col("TimeStamp").dt.hour() <= 19)
+                        )
+                        .then(pl.lit("D"))
+                        .otherwise(pl.lit("N"))
+                        .alias("Shift"),
+                        # Calculate fuel percentage
+                        (pl.col("FuelLevelLiters") / truck_capacity * 100)
+                        .clip(upper_bound=100.0)
+                        .round(4)
+                        .alias("FuelLevel"),
+                    )
+
+                    # Filter records
+                    df = df.filter(
+                        (pl.col("TruckFleet").is_in(self.VALID_TRUCK_MODELS))
+                        & (pl.col("Equipment") == self.truck)
+                    )
+
+                    # Select final columns
+                    final_cols = [
+                        "Origin",
+                        "ShiftDate",
+                        "TimeStamp",
+                        "Equipment",
+                        "TruckFleet",
+                        "FuelLevelLiters",
+                        "Shift",
+                        "FuelLevel",
+                    ]
+                    df = df.select([col for col in final_cols if col in df.columns])
 
                     dfs.append(df)
 
                 except Exception as e:
+                    # Track unsupported files and log error
                     self.unsupported_files.append(file)
                     print(f"⚠️ Error processing {Path(file).name}: {str(e)}")
 
+            # Return concatenated results
             return pl.concat(dfs) if dfs else pl.DataFrame()
 
         except Exception as e:
