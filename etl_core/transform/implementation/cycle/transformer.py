@@ -3,7 +3,6 @@ from etl_core.transform.core.base_transformer import BaseTransformer
 from etl_core.utils.cycle_schemas import CycleSchema
 from etl_core.transform.utils.unit_converter import (
     get_coordinate_conversion_exprs,
-    get_geo_validation_expr,
 )
 from pydantic import BaseModel
 import polars as pl
@@ -43,16 +42,21 @@ class CycleTransformer(BaseTransformer):
         """Optimized transformation pipeline using expressions"""
 
         # 1. Collect all transformation expressions
-        conversion_exprs = get_coordinate_conversion_exprs()
-        categorical_exprs = self._get_categorical_normalization_exprs()
+        conversion_exprsG = get_coordinate_conversion_exprs(
+            lat_col="G_Latitude", lon_col="G_Longitude", elev_col="G_Elevation"
+        )
+        conversion_exprsD = get_coordinate_conversion_exprs(
+            lat_col="D_Latitude", lon_col="D_Longitude", elev_col="D_Elevation"
+        )
+        categorical_exprs = self._get_categorical_normalization_exprs(df)
         outlier_exprs = self._get_outlier_handling_exprs()
         time_validation_exprs = self._get_time_validation_exprs()
         tonnage_validation_exprs = self._get_tonnage_validation_exprs()
-        geo_validation_expr = get_geo_validation_expr()
 
         # 2. Apply all transformations in a single step
         df = df.with_columns(
-            conversion_exprs
+            conversion_exprsG
+            + conversion_exprsD
             + categorical_exprs
             + outlier_exprs
             + time_validation_exprs
@@ -67,7 +71,7 @@ class CycleTransformer(BaseTransformer):
         self._count_tonnage_fixes(df)
 
         # 5. Apply filters and update metrics
-        df = self._apply_filters(df, geo_validation_expr)
+        df = self._apply_filters(df)
 
         # 6. Calculate derived fields
         df = self._calculate_derived_fields(df)
@@ -84,7 +88,7 @@ class CycleTransformer(BaseTransformer):
 
         return df
 
-    def _get_categorical_normalization_exprs(self) -> list[pl.Expr]:
+    def _get_categorical_normalization_exprs(self, df: pl.DataFrame) -> list[pl.Expr]:
         """Expressions for normalizing categorical fields"""
         categorical_columns = [
             "Shift",
@@ -96,6 +100,9 @@ class CycleTransformer(BaseTransformer):
             "DestinationType",
             "Destination",
         ]
+        # Filtrar solo columnas que existen en el DataFrame
+        valid_columns = [col for col in categorical_columns if col in df.columns]
+
         return [
             pl.when(
                 pl.col(col).is_null() | (pl.col(col) == "") | (pl.col(col) == "NaN")
@@ -103,8 +110,7 @@ class CycleTransformer(BaseTransformer):
             .then(pl.lit("NaN"))
             .otherwise(pl.col(col))
             .alias(col)
-            for col in categorical_columns
-            if col in df.columns
+            for col in valid_columns
         ]
 
     def _get_outlier_handling_exprs(self) -> list[pl.Expr]:
@@ -155,22 +161,13 @@ class CycleTransformer(BaseTransformer):
     def _get_tonnage_validation_exprs(self) -> list[pl.Expr]:
         """Expressions for validating tonnage fields"""
         return [
-            # Fix negative tonnage values
-            pl.when(pl.col("MeasuredTonnage") < 0)
-            .then(pl.lit(0.0))
+            # Fix outliers and negative values in tonnage fields
+            pl.when((pl.col("MeasuredTonnage") < 0) | (pl.col("MeasuredTonnage") > 500))
+            .then(0.0)
             .otherwise(pl.col("MeasuredTonnage"))
             .alias("MeasuredTonnage"),
-            pl.when(pl.col("ReportedTonnage") < 0)
-            .then(pl.lit(0.0))
-            .otherwise(pl.col("ReportedTonnage"))
-            .alias("ReportedTonnage"),
-            # Cap extremely high tonnage values (assuming max truck capacity ~400 tons)
-            pl.when(pl.col("MeasuredTonnage") > 500)
-            .then(None)
-            .otherwise(pl.col("MeasuredTonnage"))
-            .alias("MeasuredTonnage"),
-            pl.when(pl.col("ReportedTonnage") > 500)
-            .then(None)
+            pl.when((pl.col("ReportedTonnage") < 0) | (pl.col("ReportedTonnage") > 500))
+            .then(0.0)
             .otherwise(pl.col("ReportedTonnage"))
             .alias("ReportedTonnage"),
         ]
@@ -190,7 +187,7 @@ class CycleTransformer(BaseTransformer):
         for col in categorical_columns:
             if col in df.columns:
                 null_count = df.filter(
-                    pl.col(col).is_null() | (pl.col(col) == "") | (pl.col(col) == "NaN")
+                    pl.col(col).is_in(["", "NaN"]) | pl.col(col).is_null()
                 ).height
                 self.metrics["categorical_empty_fixed"] += null_count
 
@@ -216,54 +213,47 @@ class CycleTransformer(BaseTransformer):
         tonnage_columns = ["MeasuredTonnage", "ReportedTonnage"]
         for col in tonnage_columns:
             if col in df.columns:
-                invalid_count = df.filter(
-                    (pl.col(col) < 0) | (pl.col(col) > 500)
-                ).height
-                self.metrics["invalid_tonnage_fixed"] += invalid_count
+                # Only count negative values (values >500 are converted to null)
+                negative_count = df.filter(pl.col(col) < 0).height
+                self.metrics["invalid_tonnage_fixed"] += negative_count
 
-    def _apply_filters(
-        self, df: pl.DataFrame, geo_validation_expr: pl.Expr
-    ) -> pl.DataFrame:
+    def _apply_filters(self, df: pl.DataFrame) -> pl.DataFrame:
         """Apply all filters and update metrics"""
+        # Improved coordinate validation
+        geo_validation = self._get_geo_validation_expr(
+            "G_"
+        ) & self._get_geo_validation_expr("D_")
 
-        # Filter outliers (values converted to null)
+        # 1. Filter records with invalid coordinates
+        before_geo = df.height
+        df = df.filter(geo_validation)
+        self.metrics["invalid_geo_records"] = before_geo - df.height
+
+        # 2. Filter outliers (values converted to null)
         before_outliers = df.height
         outlier_conditions = (
-            pl.col("DistanceEmpty").is_not_null()
-            & pl.col("DistanceLoaded").is_not_null()
-            & pl.col("EquivalentDistance").is_not_null()
-            & pl.col("TotalCycleTime").is_not_null()
-            & pl.col("MeasuredTonnage").is_not_null()
-            & pl.col("ReportedTonnage").is_not_null()
+            ((pl.col("DistanceEmpty") >= 0) & (pl.col("DistanceEmpty") < 15000))
+            & ((pl.col("DistanceLoaded") >= 0) & (pl.col("DistanceLoaded") < 15000))
+            & (
+                (pl.col("EquivalentDistance") >= 0)
+                & (pl.col("EquivalentDistance") < 15000)
+            )
+            & ((pl.col("MeasuredTonnage") >= 0) & (pl.col("MeasuredTonnage") < 230))
+            & ((pl.col("ReportedTonnage") >= 0) & (pl.col("ReportedTonnage") < 230))
         )
+
         df = df.filter(outlier_conditions)
         self.metrics["outliers_removed"] = before_outliers - df.height
 
-        # Filter invalid geo records (both origin and destination coordinates)
-        before_geo = df.height
-        # Create validation expressions for both G_ (origin) and D_ (destination) coordinates
-        geo_validation_g = pl.struct(
-            [pl.col("G_Latitude"), pl.col("G_Longitude"), pl.col("G_Elevation")]
-        ).map_elements(lambda x: self._validate_coordinates(x), return_dtype=pl.Boolean)
-
-        geo_validation_d = pl.struct(
-            [pl.col("D_Latitude"), pl.col("D_Longitude"), pl.col("D_Elevation")]
-        ).map_elements(lambda x: self._validate_coordinates(x), return_dtype=pl.Boolean)
-
-        df = df.filter(geo_validation_g & geo_validation_d)
-        self.metrics["invalid_geo_records"] = before_geo - df.height
-
         return df
 
-    def _validate_coordinates(self, coord_struct) -> bool:
-        """Validate coordinate values are within reasonable ranges"""
-        lat, lon, elev = coord_struct
-        if lat is None or lon is None or elev is None:
-            return False
-        # Basic coordinate validation (adjust ranges based on your mining location)
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180 and -1000 <= elev <= 8000):
-            return False
-        return True
+    def _get_geo_validation_expr(self, prefix: str) -> pl.Expr:
+        """Expression to validate coordinates with prefix"""
+        return (
+            pl.col(f"{prefix}Latitude").is_between(-90, 90)
+            & pl.col(f"{prefix}Longitude").is_between(-180, 180)
+            & pl.col(f"{prefix}Elevation").is_between(-1000, 8000)
+        )
 
     def _calculate_derived_fields(self, df: pl.DataFrame) -> pl.DataFrame:
         """Calculate derived fields like efficiency metrics"""
@@ -286,12 +276,12 @@ class CycleTransformer(BaseTransformer):
                 )
                 .otherwise(0.0)
                 .alias("AverageSpeed"),
-                # Calculate loading efficiency percentage
+                # Calculate loading time percentage
                 pl.when(pl.col("TotalCycleTime") > 0)
                 .then((pl.col("LoadingMaterial") / pl.col("TotalCycleTime")) * 100)
                 .otherwise(0.0)
                 .alias("LoadingTimePercentage"),
-                # Calculate hauling efficiency percentage
+                # Calculate percentage of hauling time
                 pl.when(pl.col("TotalCycleTime") > 0)
                 .then((pl.col("Hauling") / pl.col("TotalCycleTime")) * 100)
                 .otherwise(0.0)

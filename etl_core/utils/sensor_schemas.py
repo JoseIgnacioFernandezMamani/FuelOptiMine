@@ -22,4 +22,4 @@ class SensorSchema(BaseModel):
     Ralenti: str = Field(default="NaN")
     Latitude: float  # local coordinates in milliarcseconds using the WGS84 system, required field
     Longitude: float  # local coordinates in milliarcseconds, required field
-    Elevation: float  # local coordinates in milliarcseconds, required field
+    Elevation: float  # local coordinates in centimeters, required field

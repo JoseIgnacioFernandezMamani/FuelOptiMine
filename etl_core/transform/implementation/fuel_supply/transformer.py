@@ -1,8 +1,14 @@
-from typing import List, Type
+from typing import List, Type, Optional
 from etl_core.transform.core.base_transformer import BaseTransformer
-from etl_core.utils.schemas.fuel_supply_schema import FuelSupplySchema
+from etl_core.utils.fuel_supply_schemas import FuelSupplySchema
+from etl_core.transform.utils.data_normalizer import (
+    get_categorical_normalization_exprs,
+    count_null_empty_categorical_values,
+)
+
 from pydantic import BaseModel
 import polars as pl
+from etl_core.utils import TRUCK_SPECS
 
 
 class FuelSupplyTransformer(BaseTransformer):
@@ -16,9 +22,12 @@ class FuelSupplyTransformer(BaseTransformer):
                 "invalid_truck_models": 0,
                 "invalid_origin_records": 0,
                 "outliers_removed": 0,
-                "categorical_empty_fixed": 0,
+                "categorical_null_empty_replaced": 0,
             }
         )
+        self.categorical_columns = ["TruckFleet", "Shift"]
+        self.VALID_ORIGINS = {"P068", "SST", "SURTIDOR-TRUCKSHOP"}
+        self.VALID_TRUCK_FLEETS = {"CAT789C", "CAT793D"}
 
     @property
     def mandatory_columns(self) -> List[str]:
@@ -34,87 +43,75 @@ class FuelSupplyTransformer(BaseTransformer):
         """Pydantic schema for data validation"""
         return FuelSupplySchema
 
-    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Optimized transformation pipeline using expressions"""
-        # 1. Collect all transformation expressions
-        categorical_exprs = self._get_categorical_normalization_exprs()
+    def transform(self, df: pl.DataFrame) -> Optional[pl.DataFrame]:
+        if df.is_empty() or "TruckFleet" not in df.columns:
+            print("⚠️ DataFrame vacío o falta columna TruckFleet")
+            return df
+
+        # 1. Aplicar transformaciones: normalización categórica, outliers, validaciones
+        categorical_exprs = get_categorical_normalization_exprs(
+            self.categorical_columns, default_value="NoData"
+        )
         outlier_exprs = self._get_outlier_handling_exprs()
         domain_validation_exprs = self._get_domain_validation_exprs()
 
-        # 2. Apply all transformations in a single step
         df = df.with_columns(
             categorical_exprs + outlier_exprs + domain_validation_exprs
         )
 
-        # 3. Count fixed categorical values
-        self._count_categorical_fixes(df)
+        # 2. Contar valores categóricos corregidos
+        self.metrics["categorical_null_empty_replaced"] = (
+            count_null_empty_categorical_values(
+                df, self.categorical_columns, default_value="NoData"
+            )
+        )
 
-        # 4. Apply filters and update metrics
+        # 3. Filtrar por validaciones de dominio
         df = self._apply_domain_filters(df)
 
-        # 5. Update final metrics
+        # 4. Actualizar métricas finales
         self.metrics["after_transform_records"] = df.height
+        if self.metrics["initial_records"] > 0:
+            self.metrics["final_data_percentage"] = round(
+                (df.height / self.metrics["initial_records"]) * 100, 2
+            )
+
         return df
 
-    def _get_categorical_normalization_exprs(self) -> list[pl.Expr]:
-        """Normalize categorical fields (TruckFleet and Shift)"""
+    def _get_outlier_handling_exprs(self) -> List[pl.Expr]:
+        """Convertir valores fuera de rango a nulos"""
         return [
-            # Normalize truck model names
-            pl.when(pl.col("TruckFleet").is_null() | (pl.col("TruckFleet") == ""))
-            .then(pl.lit("UnknownModel"))
-            .otherwise(pl.col("TruckFleet"))
-            .alias("TruckFleet"),
-            # Normalize shift values
-            pl.when(pl.col("Shift").is_null() | (pl.col("Shift") == ""))
-            .then(pl.lit("UnknownShift"))
-            .otherwise(pl.col("Shift"))
-            .alias("Shift"),
-        ]
-
-    def _get_outlier_handling_exprs(self) -> list[pl.Expr]:
-        """Handle outlier values in fuel metrics"""
-        return [
-            # Handle impossible fuel liters
-            pl.when(pl.col("FuelLevelLiters") > 5000)
+            pl.when(pl.col("FuelLevelLiters") > 4500)
             .then(None)
             .otherwise(pl.col("FuelLevelLiters"))
             .alias("FuelLevelLiters"),
-            # Handle impossible fuel percentages
             pl.when((pl.col("FuelLevel") < 0) | (pl.col("FuelLevel") > 100))
             .then(None)
             .otherwise(pl.col("FuelLevel"))
             .alias("FuelLevel"),
         ]
 
-    def _get_domain_validation_exprs(self) -> list[pl.Expr]:
-        """Create validation flags for domain-specific rules"""
+    def _get_domain_validation_exprs(self) -> List[pl.Expr]:
+        """Validaciones específicas del dominio"""
         return [
-            # Flag for valid truck models
-            pl.col("TruckFleet").is_in(TRUCK_SPECS.keys()).alias("__valid_model"),
-            # Flag for valid origin format
-            pl.col("Origin").str.contains(r"^[PC]\d{3}$").alias("__valid_origin"),
+            pl.col("TruckFleet")
+            .str.to_uppercase()
+            .is_in(self.VALID_TRUCK_FLEETS)
+            .alias("__valid_model"),
+            pl.col("Origin")
+            .str.to_uppercase()
+            .is_in(self.VALID_ORIGINS)
+            .alias("__valid_origin"),
         ]
 
-    def _count_categorical_fixes(self, df: pl.DataFrame) -> None:
-        """Count fixed empty values in categorical fields"""
-        for col in ["TruckFleet", "Shift"]:
-            if col in df.columns:
-                # Count records that were fixed (originally null or empty)
-                fixed_count = df.filter(pl.col(col).str.contains("Unknown")).height
-                self.metrics["categorical_empty_fixed"] += fixed_count
-
     def _apply_domain_filters(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Apply domain filters and update metrics using efficient expressions"""
-        # Count invalid records before filtering
-        invalid_model_count = df.filter(pl.col("__valid_model").not_()).height
-        invalid_origin_count = df.filter(pl.col("__valid_origin").not_()).height
-
-        # Count outliers
+        """Filtrar registros inválidos y actualizar métricas"""
+        invalid_model_count = df.filter(~pl.col("__valid_model")).height
+        invalid_origin_count = df.filter(~pl.col("__valid_origin")).height
         outlier_count = df.filter(
             pl.col("FuelLevelLiters").is_null() | pl.col("FuelLevel").is_null()
         ).height
 
-        # Apply all domain filters
         df = df.filter(
             pl.col("__valid_model")
             & pl.col("__valid_origin")
@@ -122,7 +119,6 @@ class FuelSupplyTransformer(BaseTransformer):
             & pl.col("FuelLevel").is_not_null()
         ).drop(["__valid_model", "__valid_origin"])
 
-        # Update metrics
         self.metrics["invalid_truck_models"] = invalid_model_count
         self.metrics["invalid_origin_records"] = invalid_origin_count
         self.metrics["outliers_removed"] = outlier_count

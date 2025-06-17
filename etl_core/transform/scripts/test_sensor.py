@@ -79,6 +79,7 @@ def run_sensor_etl_pipeline():
             ("Invalid schema records", "invalid_schema_records"),
             ("Outliers removed", "outliers_removed"),
             ("Invalid geo records", "invalid_geo_records"),
+            # ("categorical_null_empty_replaced"),
             ("Categorical empty fixed", "categorical_empty_fixed"),
             ("Clean data percentage", "clean_data_percentage"),
             ("Valid data percentage", "valid_data_percentage"),
@@ -88,7 +89,7 @@ def run_sensor_etl_pipeline():
         for name, key in metrics:
             value = transformer.metrics.get(key, "N/A")
             if isinstance(value, float):
-                print(f"- {name}: {value:.2f}%")
+                print(f"- {name}: {value:.4f}%")
             else:
                 print(f"- {name}: {value}")
 
@@ -100,10 +101,10 @@ def run_sensor_etl_pipeline():
             "Latitude",
             "Longitude",
             "Elevation",
-            "FuelLevelLiters",
-            "Speed",
-            "Shift",
-            "Ralenti",
+            # "FuelLevelLiters",
+            # "Speed",
+            # "Shift",
+            # "Ralenti",
         ]
         print(df_clean.select(sample_columns).head(5))
 

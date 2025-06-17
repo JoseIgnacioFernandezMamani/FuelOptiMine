@@ -100,7 +100,14 @@ class BaseTransformer(ABC):
         ts_duplicates = 0
         if "TimeStamp" in df_clean.columns:
             before_ts = len(df_clean)
-            df_clean = df_clean.unique(subset=["TimeStamp"], keep="first")
+            if "Origin" in df_clean.columns:
+                # If both TimeStamp and Origin exist, remove duplicates based on both
+                df_clean = df_clean.unique(
+                    subset=["Origin", "TimeStamp", "FuelLevelLiters"], keep="first"
+                )
+            else:
+                # If only TimeStamp exists, remove duplicates based on TimeStamp
+                df_clean = df_clean.unique(subset=["TimeStamp"], keep="first")
             ts_duplicates = before_ts - len(df_clean)
 
         # 6. Remove full duplicates
@@ -115,7 +122,7 @@ class BaseTransformer(ABC):
         # 8. Calcular porcentaje de limpieza
         if initial_count > 0:
             self.metrics["clean_data_percentage"] = round(
-                (self.metrics["after_cleaning_records"] / initial_count) * 100, 2
+                (self.metrics["after_cleaning_records"] / initial_count) * 100, 4
             )
 
         return df_clean
@@ -130,7 +137,8 @@ class BaseTransformer(ABC):
                 row_data = self._normalize_row(row)
                 self.schema_model.model_validate(row_data)
                 valid_rows.append(row_data)
-            except ValidationError:
+            except ValidationError as e:
+                print(f"❌ Error validación fila: {row} | Errores: {e.errors()}")
                 invalid_count += 1
 
         # Update metrics
@@ -139,14 +147,14 @@ class BaseTransformer(ABC):
         self.metrics["after_validation_records"] = len(df_valid)
 
         # Calculate valid data percentage
-        if self.metrics["after_cleaning_records"] > 0:
+        if self.metrics["initial_records"] > 0:
             self.metrics["valid_data_percentage"] = round(
                 (
                     self.metrics["after_validation_records"]
-                    / self.metrics["after_cleaning_records"]
+                    / self.metrics["initial_records"]
                 )
                 * 100,
-                2,
+                4,
             )
 
         return df_valid
@@ -175,6 +183,10 @@ class BaseTransformer(ABC):
             # If the value is null and the field has a default
             if value is None and not field.is_required():
                 return field.get_default()
+            # If the value is already of the correct type, return it
+            if isinstance(value, field.annotation):
+                return value
+
             if field.annotation == date:
                 return datetime.strptime(value, "%Y-%m-%d").date()
             elif field.annotation == datetime:
@@ -199,6 +211,7 @@ class BaseTransformer(ABC):
                         raise ValueError(f"Valor booleano no válido: {value}")
                 else:
                     return bool(value)
+
         except (TypeError, ValueError) as e:
             print(f"⚠️ [ERROR] Campo: {field_name} | Valor: {value} | Error: {str(e)}")
             return field.default
@@ -227,7 +240,7 @@ class BaseTransformer(ABC):
 
             # transform
             df_transformed = self.transform(df_normalized)
-            final_count = len(df_transformed) if df_transformed.is_empty() else 0
+            final_count = len(df_transformed) if not df_transformed.is_empty() else 0
             self.metrics["after_transform_records"] = final_count
 
             # calculate final data percentage
@@ -238,7 +251,7 @@ class BaseTransformer(ABC):
                         / self.metrics["initial_records"]
                     )
                     * 100,
-                    2,
+                    4,
                 )
 
             print(

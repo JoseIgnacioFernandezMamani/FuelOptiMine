@@ -8,6 +8,11 @@ from etl_core.transform.utils.unit_converter import (
 from pydantic import BaseModel
 import polars as pl
 
+from etl_core.transform.utils.data_normalizer import (
+    get_categorical_normalization_exprs,
+    count_null_empty_categorical_values,
+)
+
 
 class SensorTransformer(BaseTransformer):
     """Optimized transformer for sensor data using Polars expressions"""
@@ -18,9 +23,17 @@ class SensorTransformer(BaseTransformer):
             {
                 "outliers_removed": 0,
                 "invalid_geo_records": 0,
-                "categorical_empty_fixed": 0,
+                "categorical_null_empty_replaced": 0,
             }
         )
+
+        # Define categorical columns as class attribute
+        self.categorical_columns = [
+            "Shift",
+            "FuelGauge",
+            "Ralenti",
+            "TruckFleet",
+        ]
 
     @property
     def mandatory_columns(self) -> List[str]:
@@ -41,15 +54,19 @@ class SensorTransformer(BaseTransformer):
 
         # 1. Collect all transformation expressions
         conversion_exprs = get_coordinate_conversion_exprs()
-        categorical_exprs = self._get_categorical_normalization_exprs()
+        categorical_exprs = get_categorical_normalization_exprs(
+            self.categorical_columns
+        )
         outlier_exprs = self._get_outlier_handling_exprs()
         geo_validation_expr = get_geo_validation_expr()
 
         # 2. Apply all transformations in a single step
         df = df.with_columns(conversion_exprs + categorical_exprs + outlier_exprs)
 
-        # 3. Count fixed categorical values
-        self._count_categorical_fixes(df)
+        # 3. Count fixed categorical values using external function
+        self.metrics["categorical_null_empty_replaced"] = (
+            count_null_empty_categorical_values(df, self.categorical_columns)
+        )
 
         # 4. Apply filters and update metrics
         df = self._apply_filters(df, geo_validation_expr)
@@ -66,38 +83,22 @@ class SensorTransformer(BaseTransformer):
 
         return df
 
-    def _get_categorical_normalization_exprs(self) -> list[pl.Expr]:
-        """Expressions for normalizing categorical fields"""
-        categorical_columns = ["Shift", "FuelGauge", "Ralenti", "TruckFleet"]
-        return [
-            pl.when(pl.col(col).is_null() | (pl.col(col) == ""))
-            .then(pl.lit("NoData"))
-            .otherwise(pl.col(col))
-            .alias(col)
-            for col in categorical_columns
-        ]
-
     def _get_outlier_handling_exprs(self) -> list[pl.Expr]:
         """Expressions for handling outlier values (convert to null)"""
         return [
-            pl.when(pl.col("FuelLevelLiters") > 5000)
+            pl.when(
+                pl.col("FuelLevelLiters") > 4500
+            )  # Based on the documentation and the constant equipment values, this is the maximum valid value.
             .then(None)
             .otherwise(pl.col("FuelLevelLiters"))
             .alias("FuelLevelLiters"),
-            pl.when(pl.col("Speed") > 150)
+            pl.when(
+                pl.col("Speed") > 60
+            )  # Given the documentation, the maximum speed limit is 60.
             .then(None)
             .otherwise(pl.col("Speed"))
             .alias("Speed"),
         ]
-
-    def _count_categorical_fixes(self, df: pl.DataFrame) -> None:
-        """Count fixed empty values in categorical fields"""
-        for col in ["Shift", "FuelGauge", "Ralenti", "TruckFleet"]:
-            if col in df.columns:
-                null_count = df.filter(
-                    pl.col(col).is_null() | (pl.col(col) == "")
-                ).height
-                self.metrics["categorical_empty_fixed"] += null_count
 
     def _apply_filters(
         self, df: pl.DataFrame, geo_validation_expr: pl.Expr

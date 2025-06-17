@@ -53,7 +53,7 @@ class CSVExtractor(IFileExtractor):
         self.unsupported_files = []
         self.FORMAT = "tabular"
         self.truck_number = self.truck.replace("T-", "").strip()
-        self.VALID_TRUCK_MODELS = {"CAT - 789C", "CAT - 793D"}
+        self.VALID_TRUCK_MODELS = {"CAT789C", "CAT793D"}
 
     @staticmethod
     def _detect_separator_and_header(file_path: str) -> str:
@@ -198,30 +198,18 @@ class CSVExtractor(IFileExtractor):
                     # Handle timestamp column conversion
                     time_col = "fin_desp"
                     if time_col in df.columns:
-                        if df[time_col].dtype in (
-                            pl.Datetime,
-                            pl.Datetime("ms"),
-                            pl.Datetime("us"),
-                            pl.Datetime("ns"),
-                        ):
-                            df = df.rename({time_col: "TimeStamp"})
-                        else:
-                            df = df.with_columns(
-                                pl.col(time_col).cast(pl.Utf8),
-                                pl.col(time_col)
-                                .str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S%.f")
-                                .alias("TimeStamp"),
-                            )
-                    else:
-                        # Create empty timestamp column if missing
                         df = df.with_columns(
-                            pl.lit(None).alias("TimeStamp").cast(pl.Datetime)
+                            pl.col(time_col).cast(pl.Datetime("us")).alias("TimeStamp")
+                        )
+                    else:
+                        df = df.with_columns(
+                            pl.lit(None).cast(pl.Datetime("us")).alias("TimeStamp")
                         )
 
                     # Apply transformations
                     df = df.with_columns(
                         # Add origin from file name
-                        pl.lit(origin).alias("Origin").cast(pl.Utf8),
+                        pl.lit(origin).alias("Origin"),
                         # Extract equipment number (first 3 digits)
                         pl.col("Veh")
                         .str.slice(0, 3)
@@ -231,7 +219,7 @@ class CSVExtractor(IFileExtractor):
                         .alias("Equipment"),
                         # Normalize truck model name
                         pl.col("Descripcion")
-                        .str.replace_all(r"[\s-]+", "", literal=True)
+                        .str.replace_all(r"[\s-]+", "")
                         .alias("TruckFleet"),
                         # Convert fuel volume to float
                         pl.col("volumCorregido")
@@ -264,6 +252,24 @@ class CSVExtractor(IFileExtractor):
                         & (pl.col("Equipment") == self.truck)
                     )
 
+                    # handle timestamp and date formatting
+                    df = (
+                        df.with_columns(
+                            pl.format(
+                                "{}",
+                                pl.col("TimeStamp").dt.strftime("%Y-%m-%d %H:%M:%S.%f"),
+                            )
+                            .str.replace(r"\.(\d{3})\d+", ".$1")
+                            .alias("TimeStamp")
+                        )
+                        .with_columns(
+                            pl.col("ShiftDate").cast(pl.Utf8),
+                            pl.col("FuelLevelLiters").cast(pl.Utf8),
+                            pl.col("FuelLevel").cast(pl.Utf8),
+                        )
+                        .with_columns(pl.all().fill_null(""))
+                    )
+
                     # Select final columns
                     final_cols = [
                         "Origin",
@@ -275,7 +281,7 @@ class CSVExtractor(IFileExtractor):
                         "Shift",
                         "FuelLevel",
                     ]
-                    df = df.select([col for col in final_cols if col in df.columns])
+                    df = df.select(final_cols)
 
                     dfs.append(df)
 

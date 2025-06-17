@@ -46,21 +46,11 @@ class CycleSchema(BaseModel):
     DistanceLoaded: float = Field(default=0.0)
     G_Latitude: float = Field(
         default=0.0
-    )  # local coordinates in milliarcseconds using the WGS84 system, required field
-    G_Longitude: float = Field(
-        default=0.0
-    )  # local coordinates in milliarcseconds, required field
-    G_Elevation: float = Field(
-        default=0.0
-    )  # local coordinates in milliarcseconds, required field
-    D_Latitude: float = Field(
-        default=0.0
-    )  # local coordinates in milliarcseconds, required field
-    D_Longitude: float = Field(
-        default=0.0
-    )  # local coordinates in milliarcseconds, required field
-    D_Elevation: float = Field(
-        default=0.0
-    )  # local coordinates in milliarcseconds, required field
+    )  # local coordinates in milliarcseconds using the WGS84 system
+    G_Longitude: float = Field(default=0.0)  # local coordinates in milliarcseconds
+    G_Elevation: float = Field(default=0.0)  # local coordinates in centimeters
+    D_Latitude: float = Field(default=0.0)  # local coordinates in milliarcseconds
+    D_Longitude: float = Field(default=0.0)  # local coordinates in milliarcseconds
+    D_Elevation: float = Field(default=0.0)  # local coordinates in centimeters
     EquivalentDistance: float = Field(default=0.0)
     TotalCycleTime: float = Field(default=0.0)
