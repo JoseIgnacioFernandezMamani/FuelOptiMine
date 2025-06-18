@@ -10,8 +10,8 @@ from datetime import datetime
 
 
 class SensorDataEDA:
-    def __init__(self) -> None:
-        self.data_path = Path(DATA_DIR) / "T-211_sensor.csv"
+    def __init__(self, truck_id: str) -> None:
+        self.data_path = Path(DATA_DIR) / f"{truck_id}_sensor_data.csv"
         self.sensor_df: pl.DataFrame = None
         self._stats_cache: Dict[str, Dict[str, Any]] = None
         self._data_loaded: bool = False
@@ -381,61 +381,76 @@ class SensorDataEDA:
             return pl.DataFrame()
 
 
+import os
+
 if __name__ == "__main__":
 
-    # Inicializar analizador
-    analyzer = SensorDataEDA()
-    analyzer.run()
-
-    # Configurar formato de visualización
-    pl.Config.set_tbl_formatting("UTF8_FULL")
-    pl.Config.set_tbl_rows(10)
+    os.makedirs("refill", exist_ok=True)
 
     print("\n" + "=" * 50)
-    print("📊 Análisis de Combustible - Terminal (Pure Polars)")
+    print("📊 Análisis de Combustible - Por Camión (Pure Polars)")
     print("=" * 50)
 
-    # 1. Mostrar estructura del DataFrame
-    print("\n🔧 Estructura del DataFrame:")
-    print(f"• Registros: {analyzer.sensor_df.height}")
-    print(f"• Columnas: {analyzer.sensor_df.columns}\n")
+    # 1. Filtrar y procesar cada camión individualmente
+    TRUCK_SPECS = {
+        "T-233",
+        "T-232",
+        "T-231",
+        "T-230",
+        "T-225",
+        "T-224",
+        "T-223",
+        "T-222",
+        "T-221",
+        "T-220",
+        "T-219",
+        "T-218",
+        "T-217",
+        "T-216",
+        "T-215",
+        "T-214",
+        "T-213",
+        "T-212",
+        "T-211",
+        "T-210",
+        "T-234",
+        "T-235",
+        "T-236",
+        "T-237",
+        "T-238",
+        "T-239",
+        "T-240",
+        "T-241",
+        "T-242",
+        "T-243",
+    }
 
-    # 2. Buscar mejores parámetros para detectar al menos 372 eventos
-    # print("\n🔍 Buscando mejores parámetros para detección de recargas:")
+    for truck_id in TRUCK_SPECS:
+        # ... (código previo de inicialización del analyzer)
+        truck_analyzer = SensorDataEDA(data_path=truck_id)
+        truck_analyzer.run()
 
-    refill_events = analyzer._detect_refill_events()
+        # 2. Detectar eventos de recarga
+        try:
+            refill_events = truck_analyzer._detect_refill_events()
+        except:
+            print("error")
 
-    try:
-        refill_events.write_csv("refill_events.csv")
-        print("✅ Archivo CSV guardado como 'refill_events.csv'")
-    except Exception as e:
-        print(f"Error al guardar el archivo CSV: {e}")
-        refill_events = analyzer.search_best_params(
-            target=341, max_combinations=20000, max_threads=8
-        )
+        # 3. Guardar en archivo individual
+        filename = f"refill/{truck_id}_refill_events.csv"
+        refill_events.write_csv(filename)
 
-        # 3. Mostrar resultados
-        if refill_events.is_empty():
-            print("❌ No se encontraron recargas válidas con los parámetros probados.")
-        else:
-            print(f"✅ {refill_events.height} eventos detectados")
-            print(
-                refill_events.select(
-                    pl.col("TimeStamp").dt.strftime("%Y-%m-%d %H:%M").alias("Fecha"),
-                    pl.col("DeltaFuel").round(1),
-                    pl.col("valid_fuel").round(1),
-                    pl.col("before_avg").round(1),
-                )
-            )
+        print(f"✅ {refill_events.height} eventos guardados en {filename}")
 
-        # 4. Estadísticas clave
-        print("\n📈 Estadísticas Clave:")
-        stats = refill_events.select(
-            [
+        # 4. Mostrar resumen estadístico
+        if not refill_events.is_empty():
+            stats = refill_events.select(
                 pl.col("DeltaFuel").sum().alias("Total Recargado (L)"),
                 pl.col("DeltaFuel").mean().round(1).alias("Promedio/Recarga"),
                 pl.col("TimeStamp").min().alias("Primera Recarga"),
                 pl.col("TimeStamp").max().alias("Última Recarga"),
-            ]
-        )
-        print(stats)
+            )
+            print(f"📊 Estadísticas {truck_id}:")
+            print(stats)
+
+    print("\n✅ Proceso completado para todos los camiones!")

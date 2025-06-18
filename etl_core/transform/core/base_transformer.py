@@ -138,7 +138,7 @@ class BaseTransformer(ABC):
                 self.schema_model.model_validate(row_data)
                 valid_rows.append(row_data)
             except ValidationError as e:
-                print(f"❌ Error validación fila: {row} | Errores: {e.errors()}")
+                # print(f"❌ Error validación fila: {row} | Errores: {e.errors()}")
                 invalid_count += 1
 
         # Update metrics

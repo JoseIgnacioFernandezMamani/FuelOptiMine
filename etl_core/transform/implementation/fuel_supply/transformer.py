@@ -76,7 +76,7 @@ class FuelSupplyTransformer(BaseTransformer):
                 (df.height / self.metrics["initial_records"]) * 100, 2
             )
 
-        return df
+        return df.sort(["ShiftDate", "TimeStamp"])
 
     def _get_outlier_handling_exprs(self) -> List[pl.Expr]:
         """Convertir valores fuera de rango a nulos"""

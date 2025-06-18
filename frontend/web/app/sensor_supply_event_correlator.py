@@ -10,7 +10,8 @@ class SensorSupplyEventCorrelator:
     bajo criterios específicos de agrupación temporal y emparejamiento.
     """
 
-    def __init__(self):
+    def __init__(self, truck_id: str):
+        self.truck_id: str = truck_id
         self.refill_df: Optional[pl.DataFrame] = None
         self.fuel_supply_df: Optional[pl.DataFrame] = None
         self.merged_df: Optional[pl.DataFrame] = None
@@ -23,11 +24,13 @@ class SensorSupplyEventCorrelator:
         En el futuro, se debe usar `refill_path` y `fuel_supply_path` como entrada real o implementar
         una obtención desde base de datos.
         """
+        refill_path = f"refill/{self.truck_id}_refill_events.csv"
+        fuel_supply_path = f"output/{self.truck_id}_fuel_supply.csv"
 
-        self.refill_df = pl.read_csv("refill_events.csv").with_columns(
+        self.refill_df = pl.read_csv(refill_path).with_columns(
             pl.col("TimeStamp").str.strptime(pl.Datetime)
         )
-        self.fuel_supply_df = pl.read_csv("output/T-211_fuel_supply.csv").with_columns(
+        self.fuel_supply_df = pl.read_csv(fuel_supply_path).with_columns(
             pl.col("TimeStamp").str.strptime(pl.Datetime)
         )
 
@@ -301,13 +304,65 @@ class SensorSupplyEventCorrelator:
             }
 
 
-from datetime import date
+import os
 
-correlator = SensorSupplyEventCorrelator()
-correlator.load_datasets()
-correlator.filter_by_date_range(date(2024, 2, 1), date(2025, 2, 27))
-correlator._prepare()
-result = correlator.correlate_events()
-correlator.save_result("correlated_events3.csv", format="csv")
-print(result.height)
-print(result.head(10))
+
+if __name__ == "__main__":
+    # Lista de camiones
+    TRUCK_SPECS = [
+        "T-210",
+        "T-212",
+        "T-221",
+        "T-222",
+        "T-223",
+        "T-225",
+        "T-230",
+        "T-231",
+        "T-232",
+        "T-237",
+        "T-240",
+        "T-241",
+        "T-243",
+    ]
+    # Crear directorio para resultados
+    os.makedirs("correlated_events", exist_ok=True)
+
+    # Rango de fechas fijo para todos los camiones
+    start_date = date(2024, 2, 1)
+    end_date = date(2025, 2, 28)
+
+    print("=" * 60)
+    print(f"🔗 Correlacionando eventos para {len(TRUCK_SPECS)} camiones")
+    print(f"📅 Rango de fechas: {start_date} a {end_date}")
+    print("=" * 60)
+
+    for truck_id in TRUCK_SPECS:
+        print(f"\n🚚 Procesando camión {truck_id}...")
+
+        # 1. Inicializar correlator para el camión
+        correlator = SensorSupplyEventCorrelator(truck_id)
+
+        try:
+            # 2. Cargar datos
+            correlator.load_datasets()
+
+            # 3. Filtrar por rango de fechas
+            correlator.filter_by_date_range(start_date, end_date)
+
+            # 4. Preparar datos
+            correlator._prepare()
+
+            # 5. Correlacionar eventos
+            result = correlator.correlate_events()
+
+            # 6. Guardar resultado
+            output_path = f"correlated_events/{truck_id}_correlated_events.csv"
+            correlator.save_result(output_path, format="csv")
+
+            print(f"✅ {result.height} eventos guardados en {output_path}")
+            print(f"📦 Columnas: {result.columns}")
+
+        except Exception as e:
+            print(f"❌ Error procesando {truck_id}: {str(e)}")
+
+    print("\n🎉 Proceso completado para todos los camiones!")

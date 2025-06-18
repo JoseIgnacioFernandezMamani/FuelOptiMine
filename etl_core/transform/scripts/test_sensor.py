@@ -1,5 +1,6 @@
 from etl_core.transform.implementation.sensor.transformer import SensorTransformer
 from etl_core.extract.implementations.local.csv_extractor import CSVExtractor
+from etl_core.utils.equipment_constants import TRUCK_SPECS
 import sys
 import os
 import polars as pl
@@ -7,7 +8,7 @@ import polars as pl
 
 def run_sensor_etl_pipeline():
     # Configuración de rutas y parámetros
-    truck_id = "T-211"
+    truck_id = "T-225"
     dataset_name = "train_data"
     data_type = "sensor"
 

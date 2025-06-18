@@ -8,7 +8,7 @@ from streamlit_elements import elements, dashboard, mui, html
 
 @st.cache_resource
 def get_analyzer():
-    analyzer = SensorDataEDA()
+    analyzer = SensorDataEDA(truck_id="T-212")
     analyzer.run()
     return analyzer
 
