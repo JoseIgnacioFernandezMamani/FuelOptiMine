@@ -1,5 +1,5 @@
 import streamlit as st
-from analitycs.EDA.sensor.sensor_data_eda import DistributionAnalyzer
+from analytics.EDA.sensor.sensor_data_eda import DistributionAnalyzer
 import plotly.express as px
 
 

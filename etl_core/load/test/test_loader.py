@@ -65,7 +65,6 @@ def test_sensor_etl_pipeline():
             logger.info(f"Columnas booleanas convertidas: {bool_cols}")
 
         # 4. Carga de datos
-
         df_clean = df_clean.select(
             [
                 pl.col("ShiftDate").cast(pl.Date),

@@ -13,7 +13,8 @@ def get_data():
     return df
 
 
-def supply_eda_page_with_datagrid():
+# Cambia el nombre de la función principal a show()
+def show():
     st.title("Dashboard con DataGrid usando streamlit-elements y MUI")
 
     data = get_data()
@@ -60,5 +61,5 @@ def supply_eda_page_with_datagrid():
     )
 
 
-# Ejecutar la función directamente al importar el módulo para que st.Page la muestre
-supply_eda_page_with_datagrid()
+# REMUEVE esta línea:
+# supply_eda_page_with_datagrid()

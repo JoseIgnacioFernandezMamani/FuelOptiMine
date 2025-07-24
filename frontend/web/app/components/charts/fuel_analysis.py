@@ -1,10 +1,10 @@
-from analitycs.fuel_analysis import FuelAnalysisOptimized
+from analytics.fuel_analysis import FuelAnalysisOptimized
 
 # app.py
 import streamlit as st
 import plotly.express as px
 from datetime import datetime, timedelta
-from analitycs.fuel_analysis import FuelAnalysisOptimized
+from analytics.fuel_analysis import FuelAnalysisOptimized
 
 
 def main():

@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 import polars as pl
-from analitycs.EDA.config.settings import DATA_DIR
+from analytics.EDA.config.settings import DATA_DIR
 
 
 class BaseAnalyzer(ABC):

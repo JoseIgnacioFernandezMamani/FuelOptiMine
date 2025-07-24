@@ -106,6 +106,7 @@ class SensorSupplyEventCorrelator:
             )
             * 0.35,
             # Criterio 3: Consideracion del origen de la recarga (20%)
+            
             origin_score=(
                 pl.when(pl.col("Origin").is_in(["SURTIDOR-TRUCKSHOP"]))
                 .then(0.10)
