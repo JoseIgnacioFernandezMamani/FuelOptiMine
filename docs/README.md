@@ -17,7 +17,7 @@ Welcome to the FuelOptiMine documentation hub. This directory contains comprehen
 
 ### Technical Documentation
 - **[ETL Core Documentation](etl-core.md)** - Extract, Transform, Load pipeline documentation
-- **[Analytics Documentation](analytics.md)** - Data analysis and modeling components
+- **[Analysis Documentation](analysis/)** - Data analysis, EDA notebooks, and insights
 - **[Backend Documentation](backend.md)** - Django backend architecture and components
 - **[Frontend Documentation](frontend.md)** - Streamlit dashboard and UI components
 
