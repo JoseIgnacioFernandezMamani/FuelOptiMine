@@ -4,7 +4,7 @@ import polars as pl
 def get_coordinate_conversion_exprs(
     lat_col: str = "Latitude", lon_col: str = "Longitude", elev_col: str = "Elevation"
 ) -> list[pl.Expr]:
-    """Devuelve expresiones para conversión de coordenadas"""
+    """Returns expressions to convert coordinates from milliarcseconds to standard WGS84 and elevation from cm to meters."""
     return [
         (pl.col(lat_col) / 3600000).alias(lat_col),
         (pl.col(lon_col) / 3600000).alias(lon_col),
@@ -15,9 +15,9 @@ def get_coordinate_conversion_exprs(
 def get_geo_validation_expr(
     lat_col: str = "Latitude", lon_col: str = "Longitude", elev_col: str = "Elevation"
 ) -> pl.Expr:
-    """Devuelve expresión para validar rangos geográficos"""
+    """Returns expression to validate geographic ranges"""
     return (
         pl.col(lat_col).is_between(-90, 90)
         & pl.col(lon_col).is_between(-180, 180)
-        & pl.col(elev_col).is_between(0, 8000)
+        & pl.col(elev_col).is_between(-400, 9000)
     )

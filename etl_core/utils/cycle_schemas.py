@@ -19,29 +19,29 @@ class CycleSchema(BaseModel):
     DestinationType: str = Field(default="NaN")
     Destination: str = Field(default="NaN")
     TravelingEmpty: float = Field(default=0.0)
-    E_TravelingStart: datetime = None
-    E_TravelingEnd: datetime = None
+    E_TravelingStart: Optional[datetime] = None
+    E_TravelingEnd: Optional[datetime] = None
     WaitingEmpty: float = Field(default=0.0)
-    E_WaitingStart: datetime = None
-    E_WaitingEnd: datetime = None
+    E_WaitingStart: Optional[datetime] = None
+    E_WaitingEnd: Optional[datetime] = None
     SpottingEmpty: float = Field(default=0.0)
-    E_SpottingStart: datetime = None
-    E_SpottingEnd: datetime = None
+    E_SpottingStart: Optional[datetime] = None
+    E_SpottingEnd: Optional[datetime] = None
     LoadingMaterial: float = Field(default=0.0)
-    E_LoadingStart: datetime = None
-    E_LoadingEnd: datetime = None
+    E_LoadingStart: Optional[datetime] = None
+    E_LoadingEnd: Optional[datetime] = None
     Hauling: float = Field(default=0.0)
-    L_HaulingStart: datetime = None
-    L_HaulingEnd: datetime = None
+    L_HaulingStart: Optional[datetime] = None
+    L_HaulingEnd: Optional[datetime] = None
     WaitingLoad: float = Field(default=0.0)
-    L_WaitingStart: datetime = None
-    L_WaitingEnd: datetime = None
+    L_WaitingStart: Optional[datetime] = None
+    L_WaitingEnd: Optional[datetime] = None
     SpottingLoad: float = Field(default=0.0)
-    L_SpottingStart: datetime = None
-    L_SpottingEnd: datetime = None
+    L_SpottingStart: Optional[datetime] = None
+    L_SpottingEnd: Optional[datetime] = None
     UnloadingMaterial: float = Field(default=0.0)
-    L_UnloadingStart: datetime = None
-    L_UnloadingEnd: datetime = None
+    L_UnloadingStart: Optional[datetime] = None
+    L_UnloadingEnd: Optional[datetime] = None
     DistanceEmpty: float = Field(default=0.0)
     DistanceLoaded: float = Field(default=0.0)
     G_Latitude: float = Field(

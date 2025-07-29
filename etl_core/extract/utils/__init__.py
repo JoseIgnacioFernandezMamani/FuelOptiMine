@@ -7,7 +7,7 @@ from .file_utils import (
     find_matching_files,
 )
 
-__all__ = [
+__all__: list[str] = [
     "get_file_extension",
     "validate_extension",
     "filter_supported_files",

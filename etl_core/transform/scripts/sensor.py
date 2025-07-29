@@ -38,7 +38,7 @@ def run_sensor_etl_for_all_trucks():
         try:
             # 1. Extracción de datos
             extractor = CSVExtractor("train_data", truck_id)
-            raw_data, _ = extractor.load_data()
+            raw_data = extractor.load_data()
             df_raw = raw_data["sensor"]
 
             # 2. Transformación

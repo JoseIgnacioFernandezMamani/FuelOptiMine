@@ -24,7 +24,7 @@ def run_timemodel_etl_pipeline():
         # 1. Data extraction
         print("\n🔍 Extracting data from CSV...")
         extractor = CSVExtractor(dataset_name, truck_id)
-        raw_data, metadata = extractor.load_data()
+        raw_data = extractor.load_data()
 
         if not raw_data or data_type not in raw_data:
             raise ValueError(

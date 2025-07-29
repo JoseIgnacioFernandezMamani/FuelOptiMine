@@ -2,9 +2,11 @@ import os
 import logging
 import time
 import clickhouse_connect
+from clickhouse_connect.driver.client import Client
+from typing import Any
 
 # Configuración de conexión
-CH_CONFIG = {
+CH_CONFIG: dict[str, bool | int | str] = {
     "host": os.getenv("CLICKHOUSE_HOST", "localhost"),
     "port": int(os.getenv("CLICKHOUSE_NATIVE_PORT", 8123)),
     "username": os.getenv("CLICKHOUSE_USER", "default"),
@@ -14,7 +16,7 @@ CH_CONFIG = {
     "send_receive_timeout": 300,
 }
 # Configuración específica por dataset
-DATASET_CONFIG = {
+DATASET_CONFIG: dict[str, dict[str, str]] = {
     "sensor": {
         "table_name": "sensor",
         "schema_path": "etl_core.utils.sensor_schemas.SensorSchema",
@@ -42,7 +44,7 @@ DATASET_CONFIG = {
 }
 
 
-def create_client(params, logger=None):
+def create_client(params, logger=None) -> Client:
     """
     Creates a ClickHouse client with exponential backoff retry
     Returns: clickhouse_connect.driver.client.Client
@@ -51,12 +53,12 @@ def create_client(params, logger=None):
 
     for attempt in range(3):
         try:
-            client = clickhouse_connect.get_client(**params)
+            client: Client = clickhouse_connect.get_client(**params)
             client.command("SELECT 1")  # Connection test
             logger.info("Conexión exitosa a ClickHouse")
             return client
         except Exception as e:
-            wait_time = 2**attempt
+            wait_time: Any = 2**attempt
             logger.warning(
                 f"Intento {attempt+1} fallido. Reintentando en {wait_time}s... Error: {str(e)}"
             )

@@ -7,7 +7,7 @@ class IFileExtractor(ABC):
     """Interface for file-based data extractors"""
 
     @abstractmethod
-    def load_data(self) -> Tuple[Dict[str, pl.DataFrame], List[str]]:
+    def load_data(self) -> Dict[str, pl.DataFrame]:
         """
         Load data from source
 

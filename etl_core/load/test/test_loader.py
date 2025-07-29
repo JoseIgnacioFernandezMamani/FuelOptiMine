@@ -4,6 +4,7 @@ from etl_core.load.implementations import ClickHouseLoader
 import sys
 import os
 import logging
+from logging import Logger
 import polars as pl
 
 
@@ -20,7 +21,7 @@ def test_sensor_etl_pipeline():
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[logging.StreamHandler()],
     )
-    logger = logging.getLogger("SensorETLTest")
+    logger: Logger = logging.getLogger("SensorETLTest")
 
     logger.info(
         f"🚚 Iniciando ETL para camión {truck_id} - {dataset_name} (Sensor Data)"
@@ -30,7 +31,7 @@ def test_sensor_etl_pipeline():
         # 1. Extracción de datos
         logger.info("\n🔍 Extrayendo datos desde CSV...")
         extractor = CSVExtractor(dataset_name, truck_id)
-        raw_data, metadata = extractor.load_data()
+        raw_data = extractor.load_data()
 
         if not raw_data or data_type not in raw_data:
             logger.error(f"Datos de tipo '{data_type}' no encontrados")

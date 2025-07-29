@@ -24,7 +24,7 @@ def run_fuel_supply_etl_test():
         # 1. Extracción
         print("\n🔍 Extrayendo datos desde CSV...")
         extractor = CSVExtractor(dataset_name, truck_id)
-        raw_data, metadata = extractor.load_data()
+        raw_data = extractor.load_data()
 
         if not raw_data or data_type not in raw_data:
             raise ValueError(

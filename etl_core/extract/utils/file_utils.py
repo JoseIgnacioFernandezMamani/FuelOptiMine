@@ -8,11 +8,11 @@ from etl_core.extract.models.schemas import SUPPORTED_FORMATS, DATASET_TYPES
 
 def get_file_extension(file_path: Union[str, Path], format: str) -> str:
     """Validates and returns file extension for specified format."""
-    path = Path(file_path)
-    extension = path.suffix.lower()
+    path: Path = Path(file_path)
+    extension: str = path.suffix.lower()
 
     if extension not in SUPPORTED_FORMATS[format]:
-        supported = ", ".join(SUPPORTED_FORMATS[format])
+        supported: str = ", ".join(SUPPORTED_FORMATS[format])
         raise ValueError(
             f"Unsupported extension '{extension}' for {format}. Valid: {supported}"
         )
@@ -45,7 +45,7 @@ def validate_truck_exists(
     if dataset not in DATASET_TYPES:
         raise ValueError(f"Invalid dataset. Valid options: {DATASET_TYPES}")
 
-    patterns = generate_file_patterns(
+    patterns: list[str] = generate_file_patterns(
         base_dir=base_dir,
         dataset=dataset,
         truck=truck,

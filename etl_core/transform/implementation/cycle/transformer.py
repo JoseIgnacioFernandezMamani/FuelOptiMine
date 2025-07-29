@@ -1,17 +1,18 @@
 from typing import List, Type, Optional
-from etl_core.transform.core.base_transformer import BaseTransformer
+from etl_core.transform.core import BaseTransformer
 from etl_core.utils.cycle_schemas import CycleSchema
-from etl_core.transform.utils.unit_converter import (
+from etl_core.transform.utils import (
     get_coordinate_conversion_exprs,
 )
 from pydantic import BaseModel
 import polars as pl
+from polars import Expr
 
 
 class CycleTransformer(BaseTransformer):
     """Optimized transformer for mining cycle data using Polars expressions"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.metrics.update(
             {
@@ -42,16 +43,16 @@ class CycleTransformer(BaseTransformer):
         """Optimized transformation pipeline using expressions"""
 
         # 1. Collect all transformation expressions
-        conversion_exprsG = get_coordinate_conversion_exprs(
+        conversion_exprsG: list[Expr] = get_coordinate_conversion_exprs(
             lat_col="G_Latitude", lon_col="G_Longitude", elev_col="G_Elevation"
         )
-        conversion_exprsD = get_coordinate_conversion_exprs(
+        conversion_exprsD: list[Expr] = get_coordinate_conversion_exprs(
             lat_col="D_Latitude", lon_col="D_Longitude", elev_col="D_Elevation"
         )
-        categorical_exprs = self._get_categorical_normalization_exprs(df)
-        outlier_exprs = self._get_outlier_handling_exprs()
-        time_validation_exprs = self._get_time_validation_exprs()
-        tonnage_validation_exprs = self._get_tonnage_validation_exprs()
+        categorical_exprs: list[Expr] = self._get_categorical_normalization_exprs(df)
+        outlier_exprs: list[Expr] = self._get_outlier_handling_exprs()
+        time_validation_exprs: list[Expr] = self._get_time_validation_exprs()
+        tonnage_validation_exprs: list[Expr] = self._get_tonnage_validation_exprs()
 
         # 2. Apply all transformations in a single step
         df = df.with_columns(
@@ -90,7 +91,7 @@ class CycleTransformer(BaseTransformer):
 
     def _get_categorical_normalization_exprs(self, df: pl.DataFrame) -> list[pl.Expr]:
         """Expressions for normalizing categorical fields"""
-        categorical_columns = [
+        categorical_columns: list[str] = [
             "Shift",
             "Shovel",
             "ShovelModel",
@@ -101,7 +102,9 @@ class CycleTransformer(BaseTransformer):
             "Destination",
         ]
         # Filtrar solo columnas que existen en el DataFrame
-        valid_columns = [col for col in categorical_columns if col in df.columns]
+        valid_columns: list[str] = [
+            col for col in categorical_columns if col in df.columns
+        ]
 
         return [
             pl.when(
@@ -143,7 +146,7 @@ class CycleTransformer(BaseTransformer):
 
     def _get_time_validation_exprs(self) -> list[pl.Expr]:
         """Expressions for validating and fixing time-based fields"""
-        time_columns = [
+        time_columns: list[str] = [
             "TravelingEmpty",
             "WaitingEmpty",
             "SpottingEmpty",
@@ -174,7 +177,7 @@ class CycleTransformer(BaseTransformer):
 
     def _count_categorical_fixes(self, df: pl.DataFrame) -> None:
         """Count fixed empty values in categorical fields"""
-        categorical_columns = [
+        categorical_columns: list[str] = [
             "Shift",
             "Shovel",
             "ShovelModel",
@@ -186,14 +189,14 @@ class CycleTransformer(BaseTransformer):
         ]
         for col in categorical_columns:
             if col in df.columns:
-                null_count = df.filter(
+                null_count: int = df.filter(
                     pl.col(col).is_in(["", "NaN"]) | pl.col(col).is_null()
                 ).height
                 self.metrics["categorical_empty_fixed"] += null_count
 
     def _count_time_fixes(self, df: pl.DataFrame) -> None:
         """Count negative time values that were fixed"""
-        time_columns = [
+        time_columns: list[str] = [
             "TravelingEmpty",
             "WaitingEmpty",
             "SpottingEmpty",
@@ -205,33 +208,33 @@ class CycleTransformer(BaseTransformer):
         ]
         for col in time_columns:
             if col in df.columns:
-                negative_count = df.filter(pl.col(col) < 0).height
+                negative_count: int = df.filter(pl.col(col) < 0).height
                 self.metrics["negative_times_fixed"] += negative_count
 
     def _count_tonnage_fixes(self, df: pl.DataFrame) -> None:
         """Count invalid tonnage values that were fixed"""
-        tonnage_columns = ["MeasuredTonnage", "ReportedTonnage"]
+        tonnage_columns: list[str] = ["MeasuredTonnage", "ReportedTonnage"]
         for col in tonnage_columns:
             if col in df.columns:
                 # Only count negative values (values >500 are converted to null)
-                negative_count = df.filter(pl.col(col) < 0).height
+                negative_count: int = df.filter(pl.col(col) < 0).height
                 self.metrics["invalid_tonnage_fixed"] += negative_count
 
     def _apply_filters(self, df: pl.DataFrame) -> pl.DataFrame:
         """Apply all filters and update metrics"""
         # Improved coordinate validation
-        geo_validation = self._get_geo_validation_expr(
+        geo_validation: Expr = self._get_geo_validation_expr(
             "G_"
         ) & self._get_geo_validation_expr("D_")
 
         # 1. Filter records with invalid coordinates
-        before_geo = df.height
+        before_geo: int = df.height
         df = df.filter(geo_validation)
         self.metrics["invalid_geo_records"] = before_geo - df.height
 
         # 2. Filter outliers (values converted to null)
-        before_outliers = df.height
-        outlier_conditions = (
+        before_outliers: int = df.height
+        outlier_conditions: Expr = (
             ((pl.col("DistanceEmpty") >= 0) & (pl.col("DistanceEmpty") < 15000))
             & ((pl.col("DistanceLoaded") >= 0) & (pl.col("DistanceLoaded") < 15000))
             & (

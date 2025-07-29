@@ -16,18 +16,18 @@ def get_pydantic_field_names(schema_class) -> list[str]:
 
 
 # Generar COLUMN_MAPPING dinámicamente desde esquemas Pydantic
-COLUMN_MAPPING = {
+COLUMN_MAPPING: dict[str, list[str]] = {
     "sensor": get_pydantic_field_names(SensorSchema),
     "time_model": get_pydantic_field_names(TimeModelSchema),
     "cycle": get_pydantic_field_names(CycleSchema),
 }
 
-SUPPORTED_FORMATS = {
+SUPPORTED_FORMATS: dict[str, list[str]] = {
     "tabular": [".csv", ".tsv", ".parquet", ".feather", ".xls", ".xlsx"],
     "hierarchical": [".json", ".yaml", ".xml"],
     "binary_columnar": [".parquet", ".feather", ".orc"],
 }
 
-DATASET_TYPES = ["train_data"]
+DATASET_TYPES: list[str] = ["train_data"]
 
-FUEL_SUPPLY = ["Veh", "Descripcion", "fin_desp", "volumCorregido"]
+FUEL_SUPPLY: list[str] = ["Veh", "Descripcion", "fin_desp", "volumCorregido"]

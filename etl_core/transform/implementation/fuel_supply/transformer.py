@@ -1,20 +1,21 @@
 from typing import List, Type, Optional
-from etl_core.transform.core.base_transformer import BaseTransformer
+from etl_core.transform.core import BaseTransformer
 from etl_core.utils.fuel_supply_schemas import FuelSupplySchema
-from etl_core.transform.utils.data_normalizer import (
+from etl_core.transform.utils import (
     get_categorical_normalization_exprs,
     count_null_empty_categorical_values,
 )
 
 from pydantic import BaseModel
 import polars as pl
+from polars import Expr
 from etl_core.utils import TRUCK_SPECS
 
 
 class FuelSupplyTransformer(BaseTransformer):
     """Optimized transformer for fuel supply data using Polars expressions"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         # Initialize domain-specific metrics
         self.metrics.update(
@@ -49,11 +50,11 @@ class FuelSupplyTransformer(BaseTransformer):
             return df
 
         # 1. Aplicar transformaciones: normalización categórica, outliers, validaciones
-        categorical_exprs = get_categorical_normalization_exprs(
+        categorical_exprs: list[Expr] = get_categorical_normalization_exprs(
             self.categorical_columns, default_value="NoData"
         )
-        outlier_exprs = self._get_outlier_handling_exprs()
-        domain_validation_exprs = self._get_domain_validation_exprs()
+        outlier_exprs: list[Expr] = self._get_outlier_handling_exprs()
+        domain_validation_exprs: list[Expr] = self._get_domain_validation_exprs()
 
         df = df.with_columns(
             categorical_exprs + outlier_exprs + domain_validation_exprs
@@ -106,9 +107,9 @@ class FuelSupplyTransformer(BaseTransformer):
 
     def _apply_domain_filters(self, df: pl.DataFrame) -> pl.DataFrame:
         """Filtrar registros inválidos y actualizar métricas"""
-        invalid_model_count = df.filter(~pl.col("__valid_model")).height
-        invalid_origin_count = df.filter(~pl.col("__valid_origin")).height
-        outlier_count = df.filter(
+        invalid_model_count: int = df.filter(~pl.col("__valid_model")).height
+        invalid_origin_count: int = df.filter(~pl.col("__valid_origin")).height
+        outlier_count: int = df.filter(
             pl.col("FuelLevelLiters").is_null() | pl.col("FuelLevel").is_null()
         ).height
 

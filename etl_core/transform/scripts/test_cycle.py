@@ -22,7 +22,7 @@ def run_cycle_etl_pipeline():
         # 1. Data extraction
         print("\n🔍 Extracting data from CSV...")
         extractor = CSVExtractor(dataset_name, truck_id)
-        raw_data, metadata = extractor.load_data()
+        raw_data = extractor.load_data()
 
         if not raw_data or data_type not in raw_data:
             raise ValueError(
@@ -30,7 +30,7 @@ def run_cycle_etl_pipeline():
             )
 
         # Get Polars DataFrame directly
-        df_raw = raw_data[data_type]
+        df_raw: pl.DataFrame = raw_data[data_type]
         print(f"✅ Raw data loaded: {df_raw.height} records")
         print("Initial schema:", df_raw.schema)
 

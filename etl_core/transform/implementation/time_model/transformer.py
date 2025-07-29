@@ -1,8 +1,9 @@
 from typing import List, Type, Optional
-from etl_core.transform.core.base_transformer import BaseTransformer
+from etl_core.transform.core import BaseTransformer
 from etl_core.utils.time_model_schemas import TimeModelSchema
 from pydantic import BaseModel
 import polars as pl
+from polars import Expr
 
 
 class TimeModelTransformer(BaseTransformer):
@@ -87,14 +88,14 @@ class TimeModelTransformer(BaseTransformer):
 
     def _get_status_normalization_exprs(self) -> list[pl.Expr]:
         """Normalization of statuses and categories with encoding correction"""
-        status_mapping = {
+        status_mapping: dict[str, str] = {
             r"(?i)Operativo": "OPERATIVO",
             r"(?i)Reserva": "RESERVA",
             r"(?i)Demora": "DEMORA",
             r"(?i)Mantenimiento": "MANTENIMIENTO",
         }
 
-        category_mapping = {
+        category_mapping: dict[str, str] = {
             r"(?i)d_no_programada": "D_NO_PROGRAMADA",
             r"(?i)d_programada": "D_PROGRAMADA",
             r"(?i)efectivo": "EFECTIVO",
@@ -106,7 +107,7 @@ class TimeModelTransformer(BaseTransformer):
 
         def normalize_text(expr: pl.Expr) -> pl.Expr:
             # Encoding correction
-            corrections = {
+            corrections: dict[str, str] = {
                 "Ã¡": "a",
                 "Ã©": "e",
                 "Ã³": "o",
@@ -119,7 +120,7 @@ class TimeModelTransformer(BaseTransformer):
                 expr = expr.str.replace(wrong, right, literal=True)
 
             # Remove accents
-            accents = {
+            accents: dict[str, str] = {
                 "á": "a",
                 "é": "e",
                 "í": "i",
@@ -163,10 +164,10 @@ class TimeModelTransformer(BaseTransformer):
 
     def _count_categorical_fixes(self, df: pl.DataFrame) -> None:
         """Count corrections in categorical fields"""
-        all_categorical = self.categorical_columns + ["Status", "Category"]
+        all_categorical: list[str] = self.categorical_columns + ["Status", "Category"]
         for col in all_categorical:
             if col in df.columns:
-                null_count = df.filter(
+                null_count: int = df.filter(
                     pl.col(col).is_in(["", "NaN"]) | pl.col(col).is_null()
                 ).height
                 self.metrics["categorical_empty_fixed"] += null_count
@@ -174,14 +175,14 @@ class TimeModelTransformer(BaseTransformer):
     def _count_duration_fixes(self, df: pl.DataFrame) -> None:
         """Count corrected negative durations"""
         if "RecordDuration" in df.columns:
-            negative_count = df.filter(pl.col("RecordDuration") < 0).height
+            negative_count: int = df.filter(pl.col("RecordDuration") < 0).height
             self.metrics["negative_durations_fixed"] += negative_count
 
     def _apply_filters(self, df: pl.DataFrame) -> pl.DataFrame:
         """Filter invalid combinations without adding columns"""
-        before_filter = df.height
+        before_filter: int = df.height
 
-        invalid_combinations = (pl.col("Status") == "OPERATIVO") & (
+        invalid_combinations: Expr = (pl.col("Status") == "OPERATIVO") & (
             pl.col("Category").is_in(["D_NO_PROGRAMADA", "D_PROGRAMADA"])
         ) | (pl.col("Status") == "MANTENIMIENTO") & (
             ~pl.col("Category").str.contains("MANTENIMIENTO")

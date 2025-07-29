@@ -1,11 +1,11 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from typing import Dict, List, Tuple
 import polars as pl
 import pandas as pd
 from pathlib import Path
 import csv
 
-from etl_core.extract.interfaces.local import IFileExtractor
+from etl_core.extract.interfaces import IFileExtractor
 from etl_core.extract.utils import (
     get_file_extension,
     filter_supported_files,
@@ -22,19 +22,19 @@ from etl_core.extract.exceptions import (
     CriticalExtractionError,
 )
 from etl_core.utils import TRUCK_SPECS
-from etl_core.extract.models.schemas import (
+from etl_core.extract.models import (
     COLUMN_MAPPING,
     DATASET_TYPES,
     SUPPORTED_FORMATS,
     FUEL_SUPPLY,
 )
-from etl_core.extract.config.settings import DATA_DIR
+from etl_core.extract.config import DATA_DIR
 
 
 class CSVExtractor(IFileExtractor):
     """Extracts and consolidates tabular data from multiple file formats for specific trucks"""
 
-    def __init__(self, dataset: str, truck: str):
+    def __init__(self, dataset: str, truck: str) -> None:
         """Initialize extractor with validation
 
         Args:
@@ -56,28 +56,23 @@ class CSVExtractor(IFileExtractor):
         self.VALID_TRUCK_MODELS = {"CAT789C", "CAT793D"}
 
     @staticmethod
-    def _detect_separator_and_header(file_path: str) -> str:
-        """Detects CSV/TSV file delimiter from first line
-
-        Args:
-            file_path: Path to file
-
-        Returns:
-            Detected separator (;, \t, or ,)
-        """
+    def _detect_separator_and_header(file_path: str) -> Tuple[str, bool]:
+        """Detects CSV/TSV file delimiter and header presence"""
         with open(file_path, "r", encoding="utf-8-sig") as f:
-            line1 = f.readline()
-            line2 = f.readline()
-            sample = line1 + line2
+            lines: list[str] = [f.readline(), f.readline()]
+
+            has_multiple_lines: bool = bool(lines[1].strip())
+            sample: str = lines[0] + lines[1] if has_multiple_lines else lines[0]
+
             f.seek(0)
-            first_line = f.readline()
+            first_line: str = f.readline().strip()
 
-        dialect = csv.Sniffer().sniff(first_line)
-        separator = dialect.delimiter
-
-        header = csv.Sniffer().has_header(sample)
-
-        return separator, header
+        dialect: type[csv.excel] | type[csv.Dialect] = (
+            csv.Sniffer().sniff(first_line) if first_line else csv.excel
+        )
+        separator: str = dialect.delimiter
+        header: bool = has_multiple_lines and csv.Sniffer().has_header(sample)
+        return (separator, header)
 
     def _load_single_file(self, file_path: str, data_type: str) -> pl.DataFrame:
         """Load individual data file with format-specific handling
@@ -94,21 +89,21 @@ class CSVExtractor(IFileExtractor):
             DataLoadingWarning: For recoverable parsing errors
         """
         try:
-            ext = get_file_extension(file_path, self.FORMAT)
-            columns = COLUMN_MAPPING[data_type]
+            ext: str = get_file_extension(file_path, self.FORMAT)
+            columns: list[str] = COLUMN_MAPPING[data_type]
 
             # CSV/TSV handling
             if ext in (".csv", ".tsv"):
 
                 separator, header_file = self._detect_separator_and_header(file_path)
 
-                df = pl.read_csv(
+                df: pl.DataFrame = pl.read_csv(
                     file_path,
                     skip_rows=1 if header_file else 0,
                     separator=separator,
                     has_header=False,
                     new_columns=columns,
-                    dtypes={col: pl.String for col in columns},
+                    schema_overrides={col: pl.String for col in columns},
                     encoding="utf8",
                     ignore_errors=True,
                 )
@@ -123,23 +118,27 @@ class CSVExtractor(IFileExtractor):
 
             # Excel handling
             elif ext in (".xls", ".xlsx"):
-                pandas_df = pd.read_excel(
+                pandas_df: pd.DataFrame = pd.read_excel(
                     file_path, skiprows=1, header=None, engine="openpyxl"
                 )
                 # Validate column count
                 if pandas_df.shape[1] != len(COLUMN_MAPPING[data_type]):
+                    missing_columns: list[str] = [
+                        col for col in COLUMN_MAPPING[data_type][pandas_df.shape[1] :]
+                    ]
                     raise SchemaValidationError(
                         data_type=data_type,
+                        missing_columns=missing_columns,
                         message=f"Expected {len(COLUMN_MAPPING[data_type])} columns, found {pandas_df.shape[1]}",
                     )
                 df = pl.from_pandas(pandas_df).rename(
-                    {i: col for i, col in enumerate(COLUMN_MAPPING[data_type])}
+                    {str(i): col for i, col in enumerate(COLUMN_MAPPING[data_type])}
                 )
 
             else:
                 raise UnsupportedFormatError(
                     file_path=file_path,
-                    format=self.FORMAT,
+                    format_type=self.FORMAT,
                     supported_formats=SUPPORTED_FORMATS[self.FORMAT],
                 )
 
@@ -161,7 +160,7 @@ class CSVExtractor(IFileExtractor):
         """
         try:
             # Generate file search pattern
-            pattern = generate_file_patterns(
+            pattern: list[str] = generate_file_patterns(
                 base_dir=self.base_dir,
                 dataset=self.dataset,
                 data_type="fuel_supply",
@@ -170,22 +169,24 @@ class CSVExtractor(IFileExtractor):
             )
 
             # Find matching files
-            supply_files = find_matching_files(pattern)
+            supply_files: list[str] = find_matching_files(pattern)
             if not supply_files:
                 return pl.DataFrame()
 
-            dfs = []
+            dfs: list[pl.DataFrame] = []
             # Get truck capacity from specs
-            truck_capacity = TRUCK_SPECS.get(self.truck, {}).get("capacity", 3000)
+            truck_capacity: float | int = TRUCK_SPECS.get(self.truck, {}).get(
+                "capacity", 3000
+            )
 
             for file in supply_files:
                 try:
-                    file_name = Path(file).stem
-                    parts = file_name.split("_")
-                    origin = parts[1] if len(parts) > 1 else "Unknown"
+                    file_name: str = Path(file).stem
+                    parts: list[str] = file_name.split("_")
+                    origin: str = parts[1] if len(parts) > 1 else "Unknown"
 
                     # Read Excel file
-                    pandas_df = pd.read_excel(
+                    pandas_df: pd.DataFrame = pd.read_excel(
                         file,
                         header=0,
                         engine="openpyxl",
@@ -193,7 +194,7 @@ class CSVExtractor(IFileExtractor):
                     )
 
                     # Convert to Polars DataFrame
-                    df = pl.from_pandas(pandas_df)
+                    df: pl.DataFrame = pl.from_pandas(pandas_df)
 
                     # Handle timestamp column conversion
                     time_col = "fin_desp"
@@ -271,7 +272,7 @@ class CSVExtractor(IFileExtractor):
                     )
 
                     # Select final columns
-                    final_cols = [
+                    final_cols: list[str] = [
                         "Origin",
                         "ShiftDate",
                         "TimeStamp",
@@ -294,12 +295,12 @@ class CSVExtractor(IFileExtractor):
             return pl.concat(dfs) if dfs else pl.DataFrame()
 
         except Exception as e:
-            self.unsupported_files.append(file)
+            self.unsupported_files.append("")
             raise DataLoadingWarning(
-                file_path=file, details=str(e), dataset=self.dataset, cause=e
+                file_path="", details=str(e), dataset=self.dataset, cause=e
             ) from e
 
-    def load_data(self) -> Tuple[Dict[str, pl.DataFrame], List[str]]:
+    def load_data(self) -> Dict[str, pl.DataFrame]:
         """Main data loading pipeline
 
         Returns:
@@ -319,13 +320,13 @@ class CSVExtractor(IFileExtractor):
                 file_extension="*",
             )
 
-            datasets = {}
+            datasets: dict[str, pl.DataFrame] = {}
 
             # Process core data types
             for data_type in COLUMN_MAPPING:
                 try:
                     # Generate search patterns
-                    patterns = generate_file_patterns(
+                    patterns: list[str] = generate_file_patterns(
                         base_dir=self.base_dir,
                         dataset=self.dataset,
                         data_type=data_type,
@@ -334,7 +335,7 @@ class CSVExtractor(IFileExtractor):
                     )
 
                     # Locate and filter files
-                    all_files = find_matching_files(patterns)
+                    all_files: list[str] = find_matching_files(patterns)
                     valid_files, invalid_files = filter_supported_files(
                         all_files, self.FORMAT
                     )
@@ -345,17 +346,17 @@ class CSVExtractor(IFileExtractor):
                         continue
 
                     # Parallel file processing
-                    dfs = []
+                    dfs: list[pl.DataFrame] = []
                     with ThreadPoolExecutor() as executor:
-                        futures = {
+                        futures: dict[Future[pl.DataFrame], str] = {
                             executor.submit(self._load_single_file, f, data_type): f
                             for f in valid_files
                         }
 
                         for future in as_completed(futures):
-                            file_path = futures[future]
+                            file_path: str = futures[future]
                             try:
-                                df = future.result()
+                                df: pl.DataFrame = future.result()
                                 if not df.is_empty():
                                     dfs.append(df)
                             except RecoverableExtractionError as e:
@@ -367,12 +368,12 @@ class CSVExtractor(IFileExtractor):
                         continue
 
                     # Consolidate and validate
-                    combined_df = pl.concat(dfs)
+                    combined_df: pl.DataFrame = pl.concat(dfs)
                     if "TimeStamp" in combined_df.columns:
                         combined_df = combined_df.sort("TimeStamp")
 
                     # Schema validation
-                    missing_cols = [
+                    missing_cols: list[str] = [
                         col
                         for col in COLUMN_MAPPING[data_type]
                         if col not in combined_df.columns
@@ -392,13 +393,13 @@ class CSVExtractor(IFileExtractor):
 
             # Load dispatch data
             try:
-                dispatch_df = self._load_fuel_supply()
+                dispatch_df: pl.DataFrame = self._load_fuel_supply()
                 if not dispatch_df.is_empty():
                     datasets["fuel_supply"] = dispatch_df
             except RecoverableExtractionError as e:
                 print(f"[Recoverable] Dispatch data error: {e}")
 
-            return datasets, self.unsupported_files
+            return datasets
 
         except CriticalExtractionError as e:
             print(f"[Critical] Pipeline failed: {e}")

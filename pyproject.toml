@@ -1,3 +1,10 @@
 [project]
 name = "fueloptimine"
 version = "0.1.0"
+
+[tool.pyrefly]
+project-includes = ["**/*"]
+project-excludes = ["**/*venv/**/*"]
+importRoots = ["."]
+
+[tool]

@@ -12,4 +12,4 @@ class FuelSupplySchema(BaseModel):
     TruckFleet: str = Field(default="NaN")
     FuelLevelLiters: float  # required field
     Shift: str = Field(default="NaN")
-    FuelLevel: float = Field(default=0.0, ge=0)
+    FuelLevel: float = Field(default=0.0)

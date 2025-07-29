@@ -1,3 +1,3 @@
 from .base_transformer import BaseTransformer
 
-__all_ = ["BaseTransformer"]
+__all_: list[str] = ["BaseTransformer"]

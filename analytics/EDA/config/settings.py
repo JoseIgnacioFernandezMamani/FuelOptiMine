@@ -1,4 +1,8 @@
-TRUCK_SPECS: dict[str, dict[str, float | int] | dict[str, int]] = {
+from pathlib import Path
+
+DATA_DIR = Path(__file__).parent.parent.parent.parent / "frontend/web/app/output"
+
+TRUCK_SPECS = {
     "T-233": {"capacity": 3200, "engine_hours": 80780.05},
     "T-232": {"capacity": 3200, "engine_hours": 81615.79},
     "T-231": {"capacity": 3200, "engine_hours": 91142.87},
@@ -30,3 +34,6 @@ TRUCK_SPECS: dict[str, dict[str, float | int] | dict[str, int]] = {
     "T-242": {"capacity": 4354, "engine_hours": 68354.99},
     "T-243": {"capacity": 4354, "engine_hours": 63857.04},
 }
+
+if __name__ == "__main__":
+    print(DATA_DIR)
