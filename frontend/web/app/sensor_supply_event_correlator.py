@@ -48,7 +48,9 @@ class SensorSupplyEventCorrelator:
     def _prepare(self):
         """Prepara ambos datasets para la correlación."""
         self.refill_df = (
-            self.refill_df.select(["delta_fuel", "TimeStamp", "before_avg", "after_avg"])
+            self.refill_df.select(
+                ["delta_fuel", "TimeStamp", "before_avg", "after_avg"]
+            )
             .sort(["TimeStamp"])
             .rename({"TimeStamp": "RefillTimeStamp"})
             .with_columns(
@@ -106,7 +108,6 @@ class SensorSupplyEventCorrelator:
             )
             * 0.35,
             # Criterio 3: Consideracion del origen de la recarga (20%)
-            
             origin_score=(
                 pl.when(pl.col("Origin").is_in(["SURTIDOR-TRUCKSHOP"]))
                 .then(0.10)
@@ -310,38 +311,7 @@ import os
 
 if __name__ == "__main__":
     # Lista de camiones
-    TRUCK_SPECS = [
-        "T-233",
-        "T-232",
-        "T-231",
-        "T-230",
-        "T-225",
-        "T-224",
-        "T-223",
-        "T-222",
-        "T-221",
-        "T-220",
-        "T-219",
-        "T-218",
-        "T-217",
-        "T-216",
-        "T-215",
-        "T-214",
-        "T-213",
-        "T-212",
-        "T-211",
-        "T-210",
-        "T-234",
-        "T-235",
-        "T-236",
-        "T-237",
-        "T-238",
-        "T-239",
-        "T-240",
-        "T-241",
-        "T-242",
-        "T-243"
-    ]
+    TRUCK_SPECS = ["T-236"]
     # Crear directorio para resultados
     os.makedirs("correlated_events", exist_ok=True)
 

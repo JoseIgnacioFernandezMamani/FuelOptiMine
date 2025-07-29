@@ -1,9 +1,49 @@
 import streamlit as st
+from pathlib import Path
+import sys
+import os
+
+
+# CONFIGURACIÓN CRÍTICA: Encontrar y agregar directorio raíz al path
+def setup_project_path():
+    """Configurar el path del proyecto para permitir importaciones desde la raíz"""
+    current_file = Path(__file__).resolve()
+
+    # Buscar el directorio que contiene 'analytics'
+    search_path = current_file.parent
+    project_root = None
+
+    # Subir en la jerarquía hasta encontrar el directorio con 'analytics'
+    for i in range(5):  # Buscar máximo 5 niveles arriba
+        if (search_path / "analytics").exists():
+            project_root = search_path
+            break
+        search_path = search_path.parent
+
+    if project_root is None:
+        # Fallback: asumir estructura conocida
+        project_root = current_file.parent.parent.parent.parent
+
+    # Agregar al path si no está ya
+    project_root_str = str(project_root)
+    if project_root_str not in sys.path:
+        sys.path.insert(0, project_root_str)
+
+    print(f"🔧 Directorio raíz configurado: {project_root}")
+    print(f"📁 Analytics existe: {(project_root / 'analytics').exists()}")
+
+    return project_root
+
+
+# Ejecutar configuración
+setup_project_path()
+
+# garbage configuration
+BASE_DIR: Path = Path(__file__).resolve().parent
+LOGO_PATH: Path = BASE_DIR / "images" / "logo.png"
 
 # Configuración inicial
-st.set_page_config(
-    page_title="Fuel Analytics", page_icon="./images/logo.png", layout="wide"
-)
+st.set_page_config(page_title="Fuel Analytics", page_icon=LOGO_PATH, layout="wide")
 
 # Sistema de autenticación simplificado
 if "authenticated" not in st.session_state:
@@ -48,7 +88,7 @@ if not st.session_state.authenticated:
     login()
 else:
     # Menú principal
-    st.logo("./images/logo.png", icon_image="./images/logo.png")
+    st.logo(LOGO_PATH, icon_image=LOGO_PATH)
     nav_sections = {
         "Inicio": [home],
         "Analisis": [cycle_eda, sensor_eda, supply_eda, time_model_eda],
