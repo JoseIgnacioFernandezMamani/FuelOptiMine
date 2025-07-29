@@ -2,6 +2,8 @@ import polars as pl
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Union, Tuple
 from datetime import date, timedelta
+import numpy as np
+from scipy.optimize import minimize_scalar
 
 
 class SensorSupplyEventCorrelator:
@@ -15,6 +17,7 @@ class SensorSupplyEventCorrelator:
         self.refill_df: Optional[pl.DataFrame] = None
         self.fuel_supply_df: Optional[pl.DataFrame] = None
         self.merged_df: Optional[pl.DataFrame] = None
+        self.optimal_adjustment: Optional[float] = None
 
     def load_datasets(self):
         """
@@ -73,6 +76,49 @@ class SensorSupplyEventCorrelator:
             )
         )
 
+    def _calculate_optimal_adjustment(self, df: pl.DataFrame) -> float:
+        """
+        Calcula el valor óptimo para ajustar delta_fuel y minimizar fuel_discrepancy.
+        Solo considera filas donde ambos delta_fuel y FuelLevelLiters no son nulos.
+        """
+        # Filtrar solo filas con ambos valores presentes
+        valid_data = df.filter(
+            (pl.col("delta_fuel").is_not_null())
+            & (pl.col("FuelLevelLiters").is_not_null())
+        )
+
+        if valid_data.height == 0:
+            print("Advertencia: No hay datos válidos para optimización")
+            return 0.0
+
+        # Convertir a numpy arrays para optimización
+        delta_fuel_array = valid_data.select("delta_fuel").to_numpy().flatten()
+        fuel_level_array = valid_data.select("FuelLevelLiters").to_numpy().flatten()
+
+        def objective_function(adjustment_value):
+            """Función objetivo: promedio de la discrepancia absoluta"""
+            adjusted_delta_fuel = delta_fuel_array + adjustment_value
+            discrepancy = np.abs(adjusted_delta_fuel - fuel_level_array)
+            return np.mean(discrepancy)
+
+        # Definir rango de búsqueda
+        data_range = np.max(fuel_level_array) - np.min(delta_fuel_array)
+        search_bounds = (-data_range, data_range)
+
+        # Optimización
+        result = minimize_scalar(
+            objective_function, bounds=search_bounds, method="bounded"
+        )
+
+        if result.success:
+            optimal_value = result.x
+            print(f"Valor óptimo encontrado: {optimal_value:.6f}")
+            print(f"Discrepancia promedio mínima: {result.fun:.6f}")
+            return optimal_value
+        else:
+            print("Advertencia: La optimización no convergió, usando valor 0")
+            return 0.0
+
     def correlate_events(self) -> pl.DataFrame:
         """Correlaciona eventos usando un sistema de puntuación personalizado."""
 
@@ -80,15 +126,15 @@ class SensorSupplyEventCorrelator:
         refills = self.refill_df
         supplies = self.fuel_supply_df
 
-        # Crear producto cartesiano con ventana temporal de ±15 horas
+        # Crear producto cartesiano con ventana temporal de ±20 horas
         cross_join = refills.join(supplies, how="cross", suffix="_supply").filter(
             (
                 pl.col("SupplyTimeStamp")
-                >= pl.col("RefillTimeStamp") - pl.duration(hours=15)
+                >= pl.col("RefillTimeStamp") - pl.duration(hours=20)
             )
             & (
                 pl.col("SupplyTimeStamp")
-                <= pl.col("RefillTimeStamp") + pl.duration(hours=15)
+                <= pl.col("RefillTimeStamp") + pl.duration(hours=20)
             )
         )
         # Calcular puntuación (ejemplo con 2 criterios)
@@ -198,7 +244,8 @@ class SensorSupplyEventCorrelator:
             ]
         ).sort(pl.coalesce("RefillTimeStamp", "SupplyTimeStamp"))
 
-        self.merged_df = correlate_df.with_columns(
+        # Crear DataFrame inicial con métricas básicas
+        initial_df = correlate_df.with_columns(
             time_discrepancy=(pl.col("RefillTimeStamp") - pl.col("SupplyTimeStamp"))
             .abs()
             .dt.total_seconds(),
@@ -227,7 +274,46 @@ class SensorSupplyEventCorrelator:
             .otherwise(pl.lit("Unknown")),
         )
 
-        return self.merged_df
+        self.optimal_adjustment = self._calculate_optimal_adjustment(initial_df)
+
+        self.merged_df = initial_df.with_columns(
+            # Aplicar ajuste solo donde delta_fuel no es nulo
+            pl.when(pl.col("delta_fuel").is_not_null())
+            .then(pl.col("delta_fuel") + self.optimal_adjustment)
+            .otherwise(pl.col("delta_fuel"))
+            .alias("delta_fuel"),
+            # Recalcular fuel_discrepancy con el valor ajustado
+            pl.when(
+                (pl.col("delta_fuel").is_not_null())
+                & (pl.col("FuelLevelLiters").is_not_null())
+            )
+            .then(
+                (
+                    (pl.col("delta_fuel") + self.optimal_adjustment)
+                    - pl.col("FuelLevelLiters")
+                ).abs()
+            )
+            .otherwise(pl.col("fuel_discrepancy"))
+            .alias("fuel_discrepancy"),
+            pl.lit(self.truck_id).alias("truck_id"),
+        )
+
+        return self.merged_df.select(
+            [
+                "RefillTimeStamp",
+                "delta_fuel",
+                "before_avg",
+                "after_avg",
+                "Origin",
+                "SupplyTimeStamp",
+                "FuelLevelLiters",
+                "time_discrepancy",
+                "fuel_discrepancy",
+                "classification",
+                "event_type",
+                "truck_id",
+            ]
+        )
 
     def get_result(self) -> Optional[pl.DataFrame]:
         """Retorna el DataFrame correlacionado final."""
@@ -311,7 +397,38 @@ import os
 
 if __name__ == "__main__":
     # Lista de camiones
-    TRUCK_SPECS = ["T-236"]
+    TRUCK_SPECS = [
+        "T-210",
+        "T-211",
+        "T-212",
+        "T-213",
+        "T-214",
+        "T-215",
+        "T-216",
+        "T-217",
+        "T-218",
+        "T-219",
+        "T-220",
+        "T-221",
+        "T-222",
+        "T-223",
+        "T-224",
+        "T-225",
+        "T-230",
+        "T-231",
+        "T-232",
+        "T-233",
+        "T-234",
+        "T-235",
+        "T-236",
+        "T-237",
+        "T-238",
+        "T-239",
+        "T-240",
+        "T-241",
+        "T-242",
+        "T-243",
+    ]
     # Crear directorio para resultados
     os.makedirs("correlated_events", exist_ok=True)
 
@@ -323,6 +440,8 @@ if __name__ == "__main__":
     print(f"🔗 Correlacionando eventos para {len(TRUCK_SPECS)} camiones")
     print(f"📅 Rango de fechas: {start_date} a {end_date}")
     print("=" * 60)
+
+    result: pl.DataFrame = pl.DataFrame()
 
     for truck_id in TRUCK_SPECS:
         print(f"\n🚚 Procesando camión {truck_id}...")
@@ -341,16 +460,15 @@ if __name__ == "__main__":
             correlator._prepare()
 
             # 5. Correlacionar eventos
-            result = correlator.correlate_events()
+            df = correlator.correlate_events()
+            result = pl.concat([result, df])
 
-            # 6. Guardar resultado
-            output_path = f"correlated_events/{truck_id}_correlated_events.csv"
-            correlator.save_result(output_path, format="csv")
-
-            print(f"✅ {result.height} eventos guardados en {output_path}")
             print(f"📦 Columnas: {result.columns}")
 
         except Exception as e:
             print(f"❌ Error procesando {truck_id}: {str(e)}")
+            # 6. Guardar resultado
 
+    output_path = f"correlated_events/all_correlated_events.csv"
+    result.write_csv(output_path)
     print("\n🎉 Proceso completado para todos los camiones!")
