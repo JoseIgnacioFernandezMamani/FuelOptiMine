@@ -203,21 +203,6 @@ class SensorDataEDA:
         # Se asume un error de +20 porque el tanque 210 en la base de datos esta con 3200 pero se menciona que este mismo tiene 3216 que se le aumento la capacidad del tanque pero no esta registrado en la base de datos.
         CAPACITY = TRUCK_SPECS[truck_id]["capacity"] + 20
 
-        # almacenar candidatos de recarga sin limpiar
-        candidates_df = (
-            self.sensor_df.with_columns(
-                pl.col("FuelLevelLiters").diff(1).alias("raw_delta"),
-                pl.col("TimeStamp").alias("original_timestamp"),
-            )
-            .filter(
-                # Detectar saltos grandes en datos SIN limpiar
-                (pl.col("raw_delta") > 1000)
-                & (pl.col("FuelLevelLiters").shift(1) > 0)
-            )
-            .select(["original_timestamp", "FuelLevelLiters", "raw_delta"])
-            .sort("original_timestamp")
-        )
-
         # detectar y eliminar anomalías
         refill_df = self.sensor_df.with_columns(
             pl.col("FuelLevelLiters").diff(1).alias("diff_prev"),
@@ -367,6 +352,7 @@ class SensorDataEDA:
             )
         )
 
+        # aux dataframe para calcular el delta_fuel en caso de ruido fuerte y el timestamp sin limpiar
         aux_df = (
             unfiltered_df.with_columns(
                 pl.col("valid_fuel")
@@ -405,9 +391,9 @@ class SensorDataEDA:
             .alias("time_diff")
         )
 
-        # Filtrar solo registros donde anomaly_onset_time es después o igual y dentro de 12h
+        # Filtrar solo registros donde anomaly_onset_time es después o igual y dentro de 6h
         joined_df = joined_df.filter(
-            (pl.col("time_diff") >= 0) & (pl.col("time_diff") <= 86400)
+            (pl.col("time_diff") >= 0) & (pl.col("time_diff") <= 21600)
         )
 
         # Para cada TimeStamp de refill_df, obtener el anomaly_onset_time más cercano posterior
@@ -424,10 +410,8 @@ class SensorDataEDA:
             pl.when(pl.col("nearest_anomaly_onset").is_not_null())
             .then(pl.col("nearest_anomaly_onset"))
             .otherwise(pl.col("TimeStamp"))
-            .alias("TimeStamp")
+            .alias("TimeStamp"),
         )
-
-        #############3
 
         return (
             refill_df.filter(pl.col("delta_fuel") > 500)

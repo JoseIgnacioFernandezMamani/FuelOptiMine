@@ -17,7 +17,6 @@ class SensorSupplyEventCorrelator:
         self.refill_df: Optional[pl.DataFrame] = None
         self.fuel_supply_df: Optional[pl.DataFrame] = None
         self.merged_df: Optional[pl.DataFrame] = None
-        self.optimal_adjustment: Optional[float] = None
 
     def load_datasets(self):
         """
@@ -78,8 +77,12 @@ class SensorSupplyEventCorrelator:
 
     def _calculate_optimal_adjustment(self, df: pl.DataFrame) -> float:
         """
-        Calcula el valor óptimo para ajustar delta_fuel y minimizar fuel_discrepancy.
-        Solo considera filas donde ambos delta_fuel y FuelLevelLiters no son nulos.
+        Calcula dos valores óptimos para ajustar delta_fuel y minimizar fuel_discrepancy:
+        - subtract_value: valor a restar cuando delta_fuel > FuelLevelLiters
+        - add_value: valor a sumar cuando delta_fuel < FuelLevelLiters
+
+        Returns:
+            Tuple[float, float]: (subtract_value, add_value)
         """
         # Filtrar solo filas con ambos valores presentes
         valid_data = df.filter(
@@ -89,35 +92,107 @@ class SensorSupplyEventCorrelator:
 
         if valid_data.height == 0:
             print("Advertencia: No hay datos válidos para optimización")
-            return 0.0
+            return (0.0, 0.0)
 
         # Convertir a numpy arrays para optimización
-        delta_fuel_array = valid_data.select("delta_fuel").to_numpy().flatten()
-        fuel_level_array = valid_data.select("FuelLevelLiters").to_numpy().flatten()
-
-        def objective_function(adjustment_value):
-            """Función objetivo: promedio de la discrepancia absoluta"""
-            adjusted_delta_fuel = delta_fuel_array + adjustment_value
-            discrepancy = np.abs(adjusted_delta_fuel - fuel_level_array)
-            return np.mean(discrepancy)
-
-        # Definir rango de búsqueda
-        data_range = np.max(fuel_level_array) - np.min(delta_fuel_array)
-        search_bounds = (-data_range, data_range)
-
-        # Optimización
-        result = minimize_scalar(
-            objective_function, bounds=search_bounds, method="bounded"
+        higher_data = valid_data.filter(
+            pl.col("delta_fuel") > pl.col("FuelLevelLiters")
         )
+        subtract_value = 0.0
 
-        if result.success:
-            optimal_value = result.x
-            print(f"Valor óptimo encontrado: {optimal_value:.6f}")
-            print(f"Discrepancia promedio mínima: {result.fun:.6f}")
-            return optimal_value
+        if higher_data.height > 0:
+
+            delta_fuel_higher = higher_data.select("delta_fuel").to_numpy().flatten()
+            fuel_level_higher = (
+                higher_data.select("FuelLevelLiters").to_numpy().flatten()
+            )
+
+            def objective_function_subtract(adjustment_value):
+                """Función objetivo para valores a restar (adjustment_value será positivo)"""
+                adjusted_delta_fuel = delta_fuel_higher - abs(
+                    adjustment_value
+                )  # Siempre restar
+                discrepancy = np.abs(adjusted_delta_fuel - fuel_level_higher)
+                return np.mean(discrepancy)
+
+            # Rango de búsqueda para restar
+            max_difference = np.max(delta_fuel_higher - fuel_level_higher)
+            search_bounds_subtract = (
+                0,
+                max_difference * 1.5,
+            )  # Solo valores positivos para restar
+
+            result_subtract = minimize_scalar(
+                objective_function_subtract,
+                bounds=search_bounds_subtract,
+                method="bounded",
+            )
+
+            if result_subtract.success:
+                subtract_value = abs(result_subtract.x)  # Asegurar que sea positivo
+                print(f"Valor óptimo a RESTAR: {subtract_value:.6f}")
+                print(
+                    f"Discrepancia promedio mínima (restar): {result_subtract.fun:.6f}"
+                )
+            else:
+                print("Advertencia: Optimización para restar no convergió")
         else:
-            print("Advertencia: La optimización no convergió, usando valor 0")
-            return 0.0
+            subtract_value = 0.0
+
+        lower_data = valid_data.filter(pl.col("delta_fuel") < pl.col("FuelLevelLiters"))
+        add_value = 0.0
+
+        if lower_data.height > 0:
+            print(
+                f"Analizando {lower_data.height} registros donde delta_fuel < FuelLevelLiters"
+            )
+
+            delta_fuel_lower = lower_data.select("delta_fuel").to_numpy().flatten()
+            fuel_level_lower = lower_data.select("FuelLevelLiters").to_numpy().flatten()
+
+            def objective_function_add(adjustment_value):
+                """Función objetivo para valores a sumar (adjustment_value será positivo)"""
+                adjusted_delta_fuel = delta_fuel_lower + abs(
+                    adjustment_value
+                )  # Siempre sumar
+                discrepancy = np.abs(adjusted_delta_fuel - fuel_level_lower)
+                return np.mean(discrepancy)
+
+            # Rango de búsqueda para sumar
+            max_difference = np.max(fuel_level_lower - delta_fuel_lower)
+            search_bounds_add = (
+                0,
+                max_difference * 1.5,
+            )  # Solo valores positivos para sumar
+
+            result_add = minimize_scalar(
+                objective_function_add, bounds=search_bounds_add, method="bounded"
+            )
+
+            if result_add.success:
+                add_value = abs(result_add.x)  # Asegurar que sea positivo
+                print(f"Valor óptimo a SUMAR: {add_value:.6f}")
+                print(f"Discrepancia promedio mínima (sumar): {result_add.fun:.6f}")
+            else:
+                print("Advertencia: Optimización para sumar no convergió")
+        else:
+            print("No hay registros donde delta_fuel < FuelLevelLiters")
+
+        equal_data = valid_data.filter(
+            pl.col("delta_fuel") == pl.col("FuelLevelLiters")
+        )
+        if equal_data.height > 0:
+            print(
+                f"Encontrados {equal_data.height} registros donde delta_fuel == FuelLevelLiters (perfectos)"
+            )
+
+        print(f"\nRESUMEN DE OPTIMIZACIÓN:")
+        print(
+            f"  Valor a restar cuando delta_fuel > FuelLevelLiters: {subtract_value:.6f}"
+        )
+        print(f"  Valor a sumar cuando delta_fuel < FuelLevelLiters: {add_value:.6f}")
+
+        return (subtract_value, add_value)
 
     def correlate_events(self) -> pl.DataFrame:
         """Correlaciona eventos usando un sistema de puntuación personalizado."""
@@ -126,7 +201,7 @@ class SensorSupplyEventCorrelator:
         refills = self.refill_df
         supplies = self.fuel_supply_df
 
-        # Crear producto cartesiano con ventana temporal de ±20 horas
+        # Crear producto cartesiano con ventana temporal de ±15 horas
         cross_join = refills.join(supplies, how="cross", suffix="_supply").filter(
             (
                 pl.col("SupplyTimeStamp")
@@ -274,25 +349,31 @@ class SensorSupplyEventCorrelator:
             .otherwise(pl.lit("Unknown")),
         )
 
-        self.optimal_adjustment = self._calculate_optimal_adjustment(initial_df)
+        subtract_value, add_value = self._calculate_optimal_adjustment(initial_df)
 
         self.merged_df = initial_df.with_columns(
-            # Aplicar ajuste solo donde delta_fuel no es nulo
-            pl.when(pl.col("delta_fuel").is_not_null())
-            .then(pl.col("delta_fuel") + self.optimal_adjustment)
+            # Aplicar ajuste solo donde delta_fuel es menor a registros
+            pl.when(
+                (pl.col("delta_fuel").is_not_null())
+                & (pl.col("FuelLevelLiters").is_not_null())
+                & (pl.col("delta_fuel") < pl.col("FuelLevelLiters"))
+            )
+            .then(pl.col("delta_fuel") + add_value)
+            .when(
+                (pl.col("delta_fuel").is_not_null())
+                & (pl.col("FuelLevelLiters").is_not_null())
+                & (pl.col("delta_fuel") > pl.col("FuelLevelLiters"))
+            )
+            .then(pl.col("delta_fuel") - subtract_value)
             .otherwise(pl.col("delta_fuel"))
-            .alias("delta_fuel"),
+            .alias("delta_fuel")
+        ).with_columns(
             # Recalcular fuel_discrepancy con el valor ajustado
             pl.when(
                 (pl.col("delta_fuel").is_not_null())
                 & (pl.col("FuelLevelLiters").is_not_null())
             )
-            .then(
-                (
-                    (pl.col("delta_fuel") + self.optimal_adjustment)
-                    - pl.col("FuelLevelLiters")
-                ).abs()
-            )
+            .then((pl.col("delta_fuel") - pl.col("FuelLevelLiters")).abs())
             .otherwise(pl.col("fuel_discrepancy"))
             .alias("fuel_discrepancy"),
             pl.lit(self.truck_id).alias("truck_id"),
@@ -393,7 +474,6 @@ class SensorSupplyEventCorrelator:
 
 
 import os
-
 
 if __name__ == "__main__":
     # Lista de camiones
