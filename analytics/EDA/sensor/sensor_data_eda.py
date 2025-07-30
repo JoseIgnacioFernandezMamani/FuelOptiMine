@@ -393,7 +393,7 @@ class SensorDataEDA:
 
         # Filtrar solo registros donde anomaly_onset_time es después o igual y dentro de 6h
         joined_df = joined_df.filter(
-            (pl.col("time_diff") >= 0) & (pl.col("time_diff") <= 21600)
+            (pl.col("time_diff") >= 0) & (pl.col("time_diff") <= 14400)
         )
 
         # Para cada TimeStamp de refill_df, obtener el anomaly_onset_time más cercano posterior
