@@ -201,7 +201,7 @@ class SensorDataEDA:
         """Detect refill events in the sensor data for a specific truck"""
 
         # Se asume un error de +20 porque el tanque 210 en la base de datos esta con 3200 pero se menciona que este mismo tiene 3216 que se le aumento la capacidad del tanque pero no esta registrado en la base de datos.
-        CAPACITY = TRUCK_SPECS[truck_id]["capacity"] + 20
+        CAPACITY: float | int = TRUCK_SPECS[truck_id]["capacity"] + 20
 
         # detectar y eliminar anomalías
         refill_df = self.sensor_df.with_columns(
@@ -286,7 +286,7 @@ class SensorDataEDA:
             pl.col("valid_fuel").diff().fill_null(0).alias("delta_fuel"),
         )
 
-        refill_df = unfiltered_df.filter(
+        refill_df: pl.DataFrame = unfiltered_df.filter(
             (pl.col("delta_fuel") > min_refill_threshold - 25)
             & (pl.col("after_avg") > (pl.col("before_avg") + min_refill_threshold))
         ).sort("TimeStamp")
@@ -316,8 +316,6 @@ class SensorDataEDA:
 
         # Resultado final
         anomaly_onsets = anomaly_onsets.sort("anomaly_onset_time")
-
-        ###
 
         # recarga continua
         refill_df = (
@@ -439,38 +437,114 @@ if __name__ == "__main__":
     print("=" * 50)
 
     # 1. Filtrar y procesar cada camión individualmente
-    TRUCKS: set[str] = {
-        "T-210",
-        "T-211",
-        "T-212",
-        "T-213",
-        "T-214",
-        "T-215",
-        "T-216",
-        "T-217",
-        "T-218",
-        "T-219",
-        "T-220",
-        "T-221",
-        "T-222",
-        "T-223",
-        "T-224",
-        "T-225",
-        "T-230",
-        "T-231",
-        "T-232",
-        "T-233",
-        "T-234",
-        "T-235",
-        "T-236",
-        "T-237",
-        "T-238",
-        "T-239",
-        "T-240",
-        "T-241",
-        "T-242",
-        "T-243",
-    }
+    TRUCKS: set[str] = {"T-220"}
+    # agregacion manual
+    manual_refill: pl.DataFrame = pl.DataFrame(
+        {
+            "truck_id": [
+                "T-215",
+                "T-216",
+                "T-214",
+                "T-218",
+                "T-221",
+                "T-224",
+                "T-236",
+                "T-242",
+                "T-211",
+                "T-218",
+                "T-218",
+                "T-218",
+                "T-218",
+                "T-218",
+                "T-219",
+            ],
+            "TimeStamp": [
+                datetime(2024, 6, 13, 1, 19, 0),  # recarga constante
+                datetime(2024, 6, 11, 17, 9, 0),  # recarga constante
+                datetime(2024, 2, 17, 11, 58, 30),  # recarga pequenia
+                datetime(2024, 6, 10, 21, 50, 30),  # recarga constante
+                datetime(2024, 5, 23, 13, 54, 30),  # recarga constante
+                datetime(2024, 6, 4, 16, 2, 30),  # recarga constante
+                datetime(2024, 2, 17, 9, 55, 30),  # recarga constante
+                datetime(2024, 6, 4, 0, 29, 0),  # recarga constante
+                datetime(2024, 4, 8, 16, 59, 0),  # recarga pequenia
+                datetime(2025, 1, 26, 6, 5, 1),  # recarga pequenia
+                datetime(2025, 2, 2, 21, 9, 30),  # recarga como ruido
+                datetime(2025, 2, 7, 21, 12, 0),  # recarga como ruido
+                datetime(2025, 2, 8, 17, 26, 2),  # recarga como ruido
+                datetime(2025, 2, 26, 20, 12, 0),  # recarga como ruido
+                datetime(2024, 3, 1, 9, 13, 30),  # recarga pequenia
+            ],
+            "valid_fuel": [
+                2841.0,
+                3124.48,
+                3216.0,
+                3061.12,
+                2896.96,
+                2882.24,
+                4375.77,
+                4375.77,
+                3180.8,
+                2253.76,
+                2887.36,
+                3000.96,
+                2416.96,
+                2872.32,
+                3180.8,
+            ],
+            "delta_fuel": [
+                2009.8,
+                2195.08,
+                144.32,
+                1725.12,
+                1970.24,
+                2281.92,
+                2480.474,
+                3284.22,
+                535.04,
+                701.12,
+                1823.68,
+                2267.2,
+                1509.28,
+                2067.84,
+                504.96,
+            ],
+            "before_avg": [
+                830.2,
+                953.92,
+                3071.68,
+                1336.0,
+                926.72,
+                600.32,
+                1895.296,
+                1091.548,
+                2645.76,
+                1552.64,
+                1063.68,
+                733.76,
+                907.84,
+                804.48,
+                2675.84,
+            ],
+            "after_avg": [
+                2840.0,
+                3149.00,
+                3216.0,
+                3061.12,
+                2896.96,
+                2882.24,
+                4375.77,
+                4375.77,
+                3180.8,
+                2253.76,
+                2887.36,
+                3000.96,
+                2416.96,
+                2872.32,
+                3180.8,
+            ],
+        }
+    )
 
     for truck_id in TRUCKS:
 
@@ -479,7 +553,15 @@ if __name__ == "__main__":
 
         # 2. Detectar eventos de recarga
         try:
-            refill_events = truck_analyzer._detect_refill_events()
+            refill_events: pl.DataFrame = truck_analyzer._detect_refill_events()
+            # Filtrar manuales por camión actual
+            refill = manual_refill.filter(pl.col("truck_id") == truck_id)
+
+            # Si hay recargas manuales para este camión, las concatenamos
+            if refill.height > 0:
+                refill_events = pl.concat(
+                    [refill_events, refill.drop("truck_id")]
+                ).sort("TimeStamp")
             # 3. Guardar en archivo individual
             filename = f"frontend/web/app/refill/{truck_id}_refill_events.csv"
             refill_events.write_csv(filename)

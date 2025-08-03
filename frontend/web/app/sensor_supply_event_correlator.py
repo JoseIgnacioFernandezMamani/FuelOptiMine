@@ -20,6 +20,7 @@ class SensorSupplyEventCorrelator:
         self.refill_df: Optional[pl.DataFrame] = pl.DataFrame()
         self.fuel_supply_df: Optional[pl.DataFrame] = pl.DataFrame()
         self.merged_df: Optional[pl.DataFrame] = pl.DataFrame()
+        self.ajust_truck: dict[str, Tuple[float, float]] = {}
 
     def load_datasets(self) -> None:
         """
@@ -234,11 +235,11 @@ class SensorSupplyEventCorrelator:
         ).filter(
             (
                 pl.col("SupplyTimeStamp")
-                >= pl.col("RefillTimeStamp") - pl.duration(hours=20)
+                >= pl.col("RefillTimeStamp") - pl.duration(hours=24)
             )
             & (
                 pl.col("SupplyTimeStamp")
-                <= pl.col("RefillTimeStamp") + pl.duration(hours=20)
+                <= pl.col("RefillTimeStamp") + pl.duration(hours=24)
             )
         )
         # Calcular puntuación (ejemplo con 2 criterios)
@@ -247,7 +248,7 @@ class SensorSupplyEventCorrelator:
             time_score=(
                 1
                 - (pl.col("RefillTimeStamp") - pl.col("SupplyTimeStamp")).abs()
-                / pl.duration(hours=12)
+                / pl.duration(hours=24)
             )
             * 0.40,
             # Criterio 2: Discrepancia de combustible entre delta y recarga combustible (30%)
@@ -260,12 +261,12 @@ class SensorSupplyEventCorrelator:
             # Criterio 3: Consideracion del origen de la recarga (20%)
             origin_score=(
                 pl.when(pl.col("Origin").is_in(["SURTIDOR-TRUCKSHOP"]))
-                .then(0.10)
+                .then(0.15)
                 .otherwise(0.05)  # 15 % del puntaje total
             ),
             shift_score=(
                 pl.when(pl.col("supply_shift") == pl.col("refill_shift"))
-                .then(0.10)  # 10% del puntaje total
+                .then(0.05)  # 10% del puntaje total
                 .otherwise(0.0)
             ),
         ).with_columns(
@@ -304,19 +305,19 @@ class SensorSupplyEventCorrelator:
         best_matches: pl.DataFrame = pl.DataFrame(best_matches_rows)
 
         # Obtener supplies no emparejados
-        matched_supplies = set(
-            best_matches.select("SupplyTimeStamp").to_series().to_list()
+        matched_supplies_series: pl.Series = pl.Series(
+            [ts for ts, _ in matched_supplies]
         )
+
         unmatched_supplies: pl.DataFrame = supplies.filter(
-            ~pl.col("SupplyTimeStamp").is_in(matched_supplies)
+            ~pl.col("SupplyTimeStamp").is_in(matched_supplies_series.implode())
         )
 
         # Obtener refill no emparejados
-        matched_refills = set(
-            best_matches.select("RefillTimeStamp").to_series().to_list()
-        )
+        matched_refills_series: pl.Series = pl.Series(list(matched_refills))
+
         unmatched_refills: pl.DataFrame = refills.filter(
-            ~pl.col("RefillTimeStamp").is_in(matched_refills)
+            ~pl.col("RefillTimeStamp").is_in(matched_refills_series.implode())
         )
 
         unmatched_supplies = unmatched_supplies.with_columns(
@@ -335,7 +336,7 @@ class SensorSupplyEventCorrelator:
         )
 
         # Seleccionar mismas columnas en ambos DataFrames
-        columns_to_select = [
+        columns_to_select: list[str] = [
             "delta_fuel",
             "RefillTimeStamp",
             "before_avg",
@@ -347,7 +348,7 @@ class SensorSupplyEventCorrelator:
             "refill_shift",
         ]
 
-        correlate_df = pl.concat(
+        correlate_df: pl.DataFrame = pl.concat(
             [
                 best_matches.select(columns_to_select),
                 unmatched_supplies.select(columns_to_select),
@@ -388,6 +389,7 @@ class SensorSupplyEventCorrelator:
         )
 
         subtract_value, add_value = self._calculate_optimal_adjustment(initial_df)
+        self.ajust_truck[self.truck_id] = (subtract_value, add_value)
 
         self.merged_df = initial_df.with_columns(
             # Aplicar ajuste solo donde delta_fuel es menor a registros
@@ -417,6 +419,7 @@ class SensorSupplyEventCorrelator:
             pl.lit(self.truck_id).alias("truck_id"),
         )
 
+        # Seleccionar columnas finales
         return self.merged_df.select(
             [
                 "RefillTimeStamp",
@@ -433,6 +436,194 @@ class SensorSupplyEventCorrelator:
                 "truck_id",
             ]
         )
+
+    def correlate_anomalies(
+        self, df: pl.DataFrame, adjustments: dict[str, tuple[float, float]]
+    ) -> pl.DataFrame:
+        # Separar eventos
+        supplies = df.filter(pl.col("event_type") == "Supply_Only")
+        refills = df.filter(pl.col("event_type") == "Refill_Only")
+        both = df.filter(pl.col("event_type") == "Both_Events")
+
+        if refills.is_empty() or supplies.is_empty():
+            return df
+        # Join cruzado y filtrar por ventana de tiempo y mismo camión
+        joined: pl.DataFrame = (
+            refills.join(supplies, how="cross", suffix="_supply")
+            .filter(
+                (
+                    pl.col("SupplyTimeStamp_supply")
+                    >= pl.col("RefillTimeStamp") - pl.duration(hours=12)
+                )
+                & (
+                    pl.col("SupplyTimeStamp_supply")
+                    <= pl.col("RefillTimeStamp") + pl.duration(hours=12)
+                )
+            )
+            .with_columns(
+                (pl.col("RefillTimeStamp") - pl.col("SupplyTimeStamp_supply"))
+                .abs()
+                .dt.total_seconds()
+                .alias("abs_time_diff")
+            )
+        )
+
+        # Elegir el match más cercano por refill
+        best_matches: pl.DataFrame = joined.sort("abs_time_diff").unique(
+            subset=["RefillTimeStamp"]
+        )
+
+        # Completar columnas de supply en los refill
+        completed: pl.DataFrame = (
+            best_matches.select(
+                [
+                    "RefillTimeStamp",
+                    "delta_fuel",
+                    "before_avg",
+                    "after_avg",
+                    pl.col("Origin_supply").alias("Origin"),
+                    pl.col("SupplyTimeStamp_supply").alias("SupplyTimeStamp"),
+                    pl.col("FuelLevelLiters_supply").alias("FuelLevelLiters"),
+                    pl.col("truck_id"),
+                ]
+            )
+            .with_columns(
+                pl.when(pl.col("delta_fuel") > pl.col("FuelLevelLiters"))
+                .then(
+                    pl.col("delta_fuel")
+                    - pl.lit(adjustments.get("truck_id", (0.0, 0.0))[0])
+                )
+                .when(pl.col("delta_fuel") < pl.col("FuelLevelLiters"))
+                .then(
+                    pl.col("delta_fuel")
+                    + pl.lit(adjustments.get("truck_id", (0.0, 0.0))[1])
+                )
+                .otherwise(pl.col("delta_fuel"))
+            )
+            .with_columns(
+                (pl.col("RefillTimeStamp") - pl.col("SupplyTimeStamp"))
+                .abs()
+                .dt.total_seconds()
+                .alias("time_discrepancy"),
+                (pl.col("delta_fuel") - pl.col("FuelLevelLiters"))
+                .abs()
+                .alias("fuel_discrepancy"),
+                pl.when(pl.col("RefillTimeStamp") >= pl.col("SupplyTimeStamp"))
+                .then(pl.lit("TSNormal"))
+                .otherwise(pl.lit("TSAtrasado"))
+                .alias("classification"),
+                pl.lit("Both_Events").alias("event_type"),
+            )
+        )
+
+        # Excluir los que ya fueron emparejados
+        matched_refills = completed.select("RefillTimeStamp").to_series()
+        matched_supplies = completed.select("SupplyTimeStamp").to_series()
+
+        unmatched_refills = refills.filter(
+            ~pl.col("RefillTimeStamp").is_in(matched_refills.implode())
+        )
+        unmatched_supplies = supplies.filter(
+            ~pl.col("SupplyTimeStamp").is_in(matched_supplies.implode())
+        )
+
+        columns_to_select = [
+            "RefillTimeStamp",
+            "delta_fuel",
+            "before_avg",
+            "after_avg",
+            "Origin",
+            "SupplyTimeStamp",
+            "FuelLevelLiters",
+            "time_discrepancy",
+            "fuel_discrepancy",
+            "classification",
+            "event_type",
+            "truck_id",
+        ]
+
+        # Concatenar todo
+        final_df = pl.concat(
+            [
+                both.select(columns_to_select),
+                completed.select(columns_to_select),
+                unmatched_refills.with_columns(
+                    pl.lit(None).alias("Origin"),
+                    pl.lit(None).alias("SupplyTimeStamp"),
+                    pl.lit(None).alias("FuelLevelLiters"),
+                    pl.lit(None).alias("time_discrepancy"),
+                    pl.lit(None).alias("fuel_discrepancy"),
+                    pl.lit("Refill_Only").alias("event_type"),
+                    pl.lit("TSAtrasado").alias("classification"),
+                ).select(columns_to_select),
+                unmatched_supplies.with_columns(
+                    pl.lit(None).alias("delta_fuel"),
+                    pl.lit(None).alias("RefillTimeStamp"),
+                    pl.lit(None).alias("before_avg"),
+                    pl.lit(None).alias("after_avg"),
+                    pl.lit(None).alias("time_discrepancy"),
+                    pl.lit(None).alias("fuel_discrepancy"),
+                    pl.lit("Supply_Only").alias("event_type"),
+                    pl.lit("TSAtrasado").alias("classification"),
+                ).select(columns_to_select),
+            ]
+        ).sort(
+            by=[
+                "truck_id",
+                pl.when(pl.col("RefillTimeStamp").is_not_null())
+                .then(pl.col("RefillTimeStamp"))
+                .otherwise(pl.col("SupplyTimeStamp")),
+            ]
+        )
+
+        final_df = final_df.with_columns(
+            pl.when(pl.col("RefillTimeStamp").is_not_null())
+            .then(pl.col("RefillTimeStamp"))
+            .otherwise(pl.col("SupplyTimeStamp"))
+            .alias("unified_timestamp")
+        )
+
+        # Identificar min/max timestamps por camión
+        truck_extremes = final_df.group_by("truck_id").agg(
+            [
+                pl.col("unified_timestamp").min().alias("min_timestamp"),
+                pl.col("unified_timestamp").max().alias("max_timestamp"),
+            ]
+        )
+
+        # Agregar información de extremos al DataFrame principal
+        final_df_with_extremes = final_df.join(
+            truck_extremes, on="truck_id", how="left"
+        )
+
+        # Filtrar: mantener solo registros que NO sean extremos con event_type != "Both_Events"
+        filtered_df = final_df_with_extremes.filter(
+            ~(
+                # Es un registro extremo (min o max)
+                (
+                    (pl.col("unified_timestamp") == pl.col("min_timestamp"))
+                    | (pl.col("unified_timestamp") == pl.col("max_timestamp"))
+                )
+                # Y NO es Both_Events
+                & (pl.col("event_type") != "Both_Events")
+            )
+        ).select(
+            columns_to_select
+        )  # Mantener solo las columnas originales
+
+        # Eliminar falsos positivos de eventos de recarga
+        filtered_df = filtered_df.filter(
+            ~(
+                (pl.col("truck_id") == "T-221")
+                & (
+                    pl.col("RefillTimeStamp") == datetime(2024, 3, 12, 17, 49, 0)
+                )  # 2024-03-12T17:49:00.000000
+                & (pl.col("delta_fuel") == 521.6)
+                & (pl.col("before_avg") == 2546.56)
+                & (pl.col("after_avg") == 3068.16)
+            )
+        )
+        return filtered_df
 
     def get_result(self) -> Optional[pl.DataFrame]:
         """Retorna el DataFrame correlacionado final."""
@@ -532,7 +723,7 @@ import os
 
 if __name__ == "__main__":
     # Lista de camiones
-    TRUCK_SPECS = [
+    TRUCK_SPECS: list[str] = [
         "T-210",
         "T-211",
         "T-212",
@@ -577,6 +768,7 @@ if __name__ == "__main__":
     print("=" * 60)
 
     result: pl.DataFrame = pl.DataFrame()
+    adjustments: dict[str, tuple[float, float]] = {}
 
     for truck_id in TRUCK_SPECS:
         print(f"\n🚚 Procesando camión {truck_id}...")
@@ -597,6 +789,7 @@ if __name__ == "__main__":
             # 5. Correlacionar eventos
             df = correlator.correlate_events()
             result = pl.concat([result, df])
+            adjustments[truck_id] = correlator.ajust_truck.get(truck_id, (0.0, 0.0))
 
             print(f"📦 Columnas: {result.columns}")
 
@@ -604,6 +797,9 @@ if __name__ == "__main__":
             print(f"❌ Error procesando {truck_id}: {str(e)}")
             # 6. Guardar resultado
 
+    # correlacionar anomalias
+    df_final = correlator.correlate_anomalies(result, adjustments)
+
     output_path = f"correlated_events/all_correlated_events.csv"
-    result.write_csv(output_path)
+    df_final.write_csv(output_path)
     print("\n🎉 Proceso completado para todos los camiones!")

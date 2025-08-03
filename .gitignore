@@ -99,3 +99,10 @@ backend/database/db.sqlite3
 
 # Ignorar comprimidos
 clickhouse/*.tar.gz
+
+# ignore binary files
+*.bin
+*.deb
+*.dll
+*.so
+*.dylib

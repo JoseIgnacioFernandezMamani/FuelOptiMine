@@ -13,7 +13,7 @@ DEV_MODE = True  # Change to False for production deployment
 # load data from database
 @st.cache_resource
 def get_analyzer():
-    analyzer = SensorDataEDA(truck_id="T-215")
+    analyzer = SensorDataEDA(truck_id="T-235")
     analyzer.run()
     return analyzer
 
