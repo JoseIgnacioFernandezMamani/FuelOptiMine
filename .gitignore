@@ -1,10 +1,8 @@
-# Entorno virtual
+# Virtual environment
 fueloptimine-env/
 venv/
 env/
 .env
-
-# Archivos de Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -31,14 +29,15 @@ wheels/
 */.ipynb_checkpoints/*
 notebooks/.ipynb_checkpoints/
 
-# Datos (si deseas excluir)
+# Data (if you want to exclude it)
 data-set/**/*.csv
 data-set/**/*.xlsx
 data-set/**/*.parquet
 data-set/**/*.json
 data-set/**/*.pkl
+*.csv
 
-# Modelo guardado (archivos pesados)
+# Saved model (heavy files)
 model/predictive/**/registry/*
 *.h5
 *.pkl
@@ -47,34 +46,29 @@ model/predictive/**/registry/*
 *.pt
 *.pth
 
-# Archivos MLflow
+# Saved model (heavy files)
 mlruns/
 mlartifacts/
 
-# Logs y reportes
+# Logs and reports
 *.log
 logs/
 reports/
 analytics/reports/*.pdf
 analytics/reports/*.xlsx
 
-# Configuración local que no debe compartirse
+# Local configuration that should not be shared
 config/local.py
 config/secrets.toml
 config/credentials.yaml
 *.env
 
-# Archivos de Windows
+# Windows files
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# Archivos de macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-
-# Archivos IDE
+# IDE files
 .idea/
 .vscode/
 *.swp
@@ -83,19 +77,32 @@ Desktop.ini
 *.sublime-workspace
 *.sublime-project
 
-# Archivos temporales
+# Temp files
 .tmp/
 .temp/
 tmp/
 temp/
 
-# Archivos de prueba
+# Testing files
 .coverage
 htmlcov/
 .pytest_cache/
 tests/temp/
 .tox/
 
-# Archivos específicos de la API
+# especific files configuration
 backend/api/keys/
 backend/api/config/secrets.json
+
+# database files
+backend/database/db.sqlite3
+
+# Ignorar comprimidos
+clickhouse/*.tar.gz
+
+# ignore binary files
+*.bin
+*.deb
+*.dll
+*.so
+*.dylib

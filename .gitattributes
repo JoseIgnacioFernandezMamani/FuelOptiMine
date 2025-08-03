@@ -1,8 +1,8 @@
-# Configuración global: normalizar finales de línea automáticamente
+# Global settings: Normalize line endings automatically
 * text=auto eol=lf
 
-# Asegurar que todos los archivos de texto usen LF en el repositorio
-# pero se conviertan según las configuraciones locales al checkout
+# Ensure all text files use LF in the repository
+# but are converted according to local settings upon checkout
 *.txt text
 *.md text
 *.json text
@@ -14,30 +14,30 @@
 *.js text
 *.py text
 
-# Para archivos específicos de Python
+# For Python-specific files
 *.py text diff=python eol=lf
 *.pyx text diff=python eol=lf
 *.pxd text diff=python eol=lf
 *.ipynb text eol=lf
 
-# Archivos de configuración
+# Configuration files
 *.toml text eol=lf
 *.ini text eol=lf
 *.cfg text eol=lf
 requirements.txt text eol=lf
 Makefile text eol=lf
 
-# Scripts Shell deben siempre usar LF
+# Shell scripts should always use LF
 *.sh text eol=lf
 *.bash text eol=lf
 *.zsh text eol=lf
 
-# Scripts de Windows usan CRLF
+# Windows scripts use CRLF
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
 
-# Archivos binarios que nunca deben ser modificados
+# Binary files should never be modified
 *.png binary
 *.jpg binary
 *.jpeg binary
@@ -50,7 +50,7 @@ Makefile text eol=lf
 *.ttf binary
 *.otf binary
 
-# Archivos de datos binarios
+# Binary data files
 *.parquet binary
 *.pkl binary
 *.h5 binary
@@ -59,7 +59,7 @@ Makefile text eol=lf
 *.pt binary
 *.pth binary
 
-# Archivos de office como binarios
+# Office files as binaries
 *.xlsx binary
 *.xls binary
 *.docx binary
@@ -67,7 +67,7 @@ Makefile text eol=lf
 *.pptx binary
 *.pdf binary
 
-# Archivos de Python compilados
+# Compiled Python files
 *.pyc binary
 *.pyo binary
 *.pyd binary
