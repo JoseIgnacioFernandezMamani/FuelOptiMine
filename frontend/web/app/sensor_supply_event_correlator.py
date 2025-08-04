@@ -607,12 +607,10 @@ class SensorSupplyEventCorrelator:
                 # Y NO es Both_Events
                 & (pl.col("event_type") != "Both_Events")
             )
-        ).select(
-            columns_to_select
-        )  # Mantener solo las columnas originales
+        ).select(columns_to_select)
 
         # Eliminar falsos positivos de eventos de recarga
-        filtered_df = filtered_df.filter(
+        """ filtered_df = filtered_df.filter(
             ~(
                 (pl.col("truck_id") == "T-221")
                 & (
@@ -622,7 +620,7 @@ class SensorSupplyEventCorrelator:
                 & (pl.col("before_avg") == 2546.56)
                 & (pl.col("after_avg") == 3068.16)
             )
-        )
+        ) """
         return filtered_df
 
     def get_result(self) -> Optional[pl.DataFrame]:

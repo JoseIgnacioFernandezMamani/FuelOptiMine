@@ -13,11 +13,6 @@ def run_timemodel_etl_pipeline():
     dataset_name = "train_data"
     data_type = "time_model"  # Cambiado a timemodel
 
-    # Configurar rutas de importación
-    sys.path.append(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    )
-
     print(f"🚚 Starting ETL for truck {truck_id} - {dataset_name} (Time Model Data)")
 
     try:
@@ -101,11 +96,10 @@ def run_timemodel_etl_pipeline():
         print(df_clean.select(sample_columns).head(5))
 
         # 6. Save results
-        """         
+
         output_path = os.path.join(os.getcwd(), f"{truck_id}_timemodel_transformed.csv")
         df_clean.write_csv(output_path)
         print(f"\n💾 Results saved to: {output_path}")
-        """
 
     except Exception as e:
         print(f"\n❌ Critical error in pipeline: {str(e)}")

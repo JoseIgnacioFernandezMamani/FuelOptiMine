@@ -3,7 +3,7 @@ from .equipment_constants import TRUCK_SPECS
 from .fuel_supply_schemas import FuelSupplySchema
 from .sensor_schemas import SensorSchema
 from .time_model_schemas import TimeModelSchema
-from .fuel_optimine_table import create_table_lstm_fuel
+from .fuel_optimine_table import CREATE_TABLE_LSTM_FUEL
 
 __all__: list[str] = [
     "CycleSchema",
@@ -11,5 +11,5 @@ __all__: list[str] = [
     "FuelSupplySchema",
     "SensorSchema",
     "TimeModelSchema",
-    "create_table_lstm_fuel",
+    "CREATE_TABLE_LSTM_FUEL",
 ]
