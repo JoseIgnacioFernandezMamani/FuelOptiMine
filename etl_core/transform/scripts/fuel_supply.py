@@ -56,13 +56,13 @@ def run_fuel_supply_etl_for_all_trucks():
 
         try:
             # 1. Extracción de datos
-            extractor = CSVExtractor("train_data", truck_id)
-            raw_data = extractor.load_data()
-            df_raw = raw_data["fuel_supply"]
+            extractor: CSVExtractor = CSVExtractor("train_data", truck_id)
+            raw_data: dict[str, pl.DataFrame] = extractor.load_data()
+            df_raw: pl.DataFrame = raw_data["fuel_supply"]
 
             # 2. Transformación
-            transformer = FuelSupplyTransformer()
-            df_clean = transformer.run_transform(df_raw)
+            transformer: FuelSupplyTransformer = FuelSupplyTransformer()
+            df_clean: pl.DataFrame = transformer.run_transform(df_raw)
 
             # 3. Guardar resultados
             output_path = os.path.join(output_dir, f"{truck_id}_fuel_supply.csv")

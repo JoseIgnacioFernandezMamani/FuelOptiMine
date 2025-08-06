@@ -1,4 +1,4 @@
-create_table_lstm_fuel = """
+CREATE_TABLE_LSTM_FUEL = """
 CREATE TABLE IF NOT EXISTS fuel_optimine.lstm_fuel
 (
     -- key fields
@@ -78,5 +78,5 @@ PRIMARY KEY (Equipment, TimeStamp)
 SETTINGS 
     index_granularity = 8192,
     storage_policy = 'hot_cold',
-    allow_nullable_key = 1,
+    allow_nullable_key = 1
 """

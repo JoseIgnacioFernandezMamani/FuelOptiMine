@@ -15,33 +15,6 @@ CH_CONFIG: dict[str, bool | int | str] = {
     "compress": True,
     "send_receive_timeout": 300,
 }
-# Configuración específica por dataset
-DATASET_CONFIG: dict[str, dict[str, str]] = {
-    "sensor": {
-        "table_name": "sensor",
-        "schema_path": "etl_core.utils.sensor_schemas.SensorSchema",
-        "order_by": "(Equipment, ShiftDate, TimeStamp)",
-        "engine": "MergeTree",
-    },
-    "fuel_supply": {
-        "table_name": "fuel_supply",
-        "schema_path": "etl_core.utils.fuel_supply_schemas.FuelSupplySchema",
-        "order_by": "(Veh, fin_desp)",
-        "engine": "MergeTree",
-    },
-    "time_mode": {
-        "table_name": "time_model",
-        "schema_path": "etl_core.utils.time_model_schemas.TimeModelSchema",
-        "order_by": "(Equipment, ShiftDate, TimeStamp)",
-        "engine": "MergeTree",
-    },
-    "cycle": {
-        "table_name": "cycle",
-        "schema_path": "etl_core.utils.cycle_schemas.CycleSchema",
-        "order_by": "(Equipment, ShiftDate)",
-        "engine": "MergeTree",
-    },
-}
 
 
 def create_client(params, logger=None) -> Client:
