@@ -196,85 +196,78 @@ class SensorDataEDA:
     def _detect_refill_events(
         self,
         min_refill_threshold=190,
-        # Basado en el análisis de los documentos donde se calcula el umbral de recarga.
     ) -> pl.DataFrame:
         """Detect refill events in the sensor data for a specific truck"""
+        CAPACITY = TRUCK_SPECS[truck_id]["capacity"] + 20
 
-        # Se asume un error de +20 porque el tanque 210 en la base de datos esta con 3200 pero se menciona que este mismo tiene 3216 que se le aumento la capacidad del tanque pero no esta registrado en la base de datos.
-        CAPACITY: float | int = TRUCK_SPECS[truck_id]["capacity"] + 20
-
-        # detectar y eliminar anomalías
-        refill_df = self.sensor_df.with_columns(
-            pl.col("FuelLevelLiters").diff(1).alias("diff_prev"),
-            pl.col("FuelLevelLiters").shift(-1).diff(1).alias("diff_next"),
-            pl.col("FuelLevelLiters").shift(-2).diff(1).alias("diff_next_next"),
-            pl.col("FuelLevelLiters")
-            .rolling_median(window_size=100, min_samples=10)
-            .alias("median_before"),
-            pl.col("FuelLevelLiters")
-            .shift(-100)
-            .rolling_median(window_size=100, min_samples=10)
-            .alias("median_after"),
-        ).with_columns(
-            (
-                (pl.col("FuelLevelLiters") >= CAPACITY)
-                | (pl.col("FuelLevelLiters") <= 0)
-                | (
-                    # picos
-                    (pl.col("diff_prev") > min_refill_threshold)
-                    & (pl.col("diff_next") < -min_refill_threshold)
-                )
-                | (
-                    # barrancos
-                    (pl.col("diff_prev") < -min_refill_threshold)
-                    & (pl.col("diff_next") > min_refill_threshold)
-                )
-                | (
-                    # ruido opcion 1
-                    (pl.col("diff_prev") > min_refill_threshold)
-                    & (pl.col("diff_next") < -min_refill_threshold)
-                    & (pl.col("diff_next_next") > min_refill_threshold)
-                )
-                | (
-                    # ruido opcion 2
-                    (pl.col("diff_prev") < -min_refill_threshold)
-                    & (pl.col("diff_next") > min_refill_threshold)
-                    & (pl.col("diff_next_next") < -min_refill_threshold)
-                )
-                | (
-                    # mesetas
-                    (
-                        pl.col("FuelLevelLiters")
-                        > pl.col("median_before") + (min_refill_threshold // 2)
+        # Detección y eliminación de anomalías
+        refill_df = (
+            self.sensor_df.with_columns(
+                pl.col("FuelLevelLiters").diff(1).alias("diff_prev"),
+                pl.col("FuelLevelLiters").shift(-1).diff(1).alias("diff_next"),
+                pl.col("FuelLevelLiters").shift(-2).diff(1).alias("diff_next_next"),
+                pl.col("FuelLevelLiters")
+                .rolling_median(window_size=100, min_samples=10)
+                .alias("median_before"),
+                pl.col("FuelLevelLiters")
+                .shift(-100)
+                .rolling_median(window_size=100, min_samples=10)
+                .alias("median_after"),
+            )
+            .with_columns(
+                (
+                    (pl.col("FuelLevelLiters") >= CAPACITY)
+                    | (pl.col("FuelLevelLiters") <= 0)
+                    | (
+                        (pl.col("diff_prev") > min_refill_threshold)
+                        & (pl.col("diff_next") < -min_refill_threshold)
                     )
-                    & (
-                        pl.col("FuelLevelLiters")
-                        > pl.col("median_after") + min_refill_threshold
+                    | (
+                        (pl.col("diff_prev") < -min_refill_threshold)
+                        & (pl.col("diff_next") > min_refill_threshold)
                     )
-                )
-                | (
-                    # valles
-                    (
-                        pl.col("FuelLevelLiters") + min_refill_threshold
-                        < pl.col("median_before")
+                    | (
+                        (pl.col("diff_prev") > min_refill_threshold)
+                        & (pl.col("diff_next") < -min_refill_threshold)
+                        & (pl.col("diff_next_next") > min_refill_threshold)
                     )
-                    & (
-                        pl.col("FuelLevelLiters") + (min_refill_threshold // 2)
-                        < pl.col("median_after")
+                    | (
+                        (pl.col("diff_prev") < -min_refill_threshold)
+                        & (pl.col("diff_next") > min_refill_threshold)
+                        & (pl.col("diff_next_next") < -min_refill_threshold)
                     )
-                )
-            ).alias("is_anomaly")
+                    | (
+                        (
+                            pl.col("FuelLevelLiters")
+                            > pl.col("median_before") + (min_refill_threshold // 2)
+                        )
+                        & (
+                            pl.col("FuelLevelLiters")
+                            > pl.col("median_after") + min_refill_threshold
+                        )
+                    )
+                    | (
+                        (
+                            pl.col("FuelLevelLiters") + min_refill_threshold
+                            < pl.col("median_before")
+                        )
+                        & (
+                            pl.col("FuelLevelLiters") + (min_refill_threshold // 2)
+                            < pl.col("median_after")
+                        )
+                    )
+                ).alias("is_anomaly")
+            )
+            .with_columns(
+                pl.when(pl.col("is_anomaly"))
+                .then(None)
+                .otherwise(pl.col("FuelLevelLiters"))
+                .forward_fill()
+                .alias("valid_fuel")
+            )
         )
 
-        refill_df = refill_df.with_columns(
-            pl.when(pl.col("is_anomaly"))
-            .then(None)
-            .otherwise(pl.col("FuelLevelLiters"))
-            .forward_fill()
-            .alias("valid_fuel")
-        )
-
-        # recarga rapida
+        # Detección de eventos rápidos
         unfiltered_df = refill_df.with_columns(
             pl.col("valid_fuel")
             .rolling_median(window_size=15, min_samples=5)
@@ -286,12 +279,12 @@ class SensorDataEDA:
             pl.col("valid_fuel").diff().fill_null(0).alias("delta_fuel"),
         )
 
-        refill_df: pl.DataFrame = unfiltered_df.filter(
+        refill_df = unfiltered_df.filter(
             (pl.col("delta_fuel") > min_refill_threshold - 25)
             & (pl.col("after_avg") > (pl.col("before_avg") + min_refill_threshold))
         ).sort("TimeStamp")
 
-        ### anomalias
+        # Procesamiento de anomalías
         anomalies_df = unfiltered_df.with_columns(
             pl.col("is_anomaly")
             .cast(pl.Int8)
@@ -301,23 +294,56 @@ class SensorDataEDA:
             .cum_sum()
             .alias("anomaly_group"),
             pl.col("FuelLevelLiters").diff().fill_null(0).alias("delta_fuel_anomaly"),
+            pl.col("valid_fuel")
+            .shift(-100)
+            .rolling_median(window_size=50, min_samples=20)
+            .alias("improved_after_avg_100"),
+            pl.col("valid_fuel")
+            .shift(-50)
+            .rolling_median(window_size=30, min_samples=15)
+            .alias("improved_after_avg_50"),
+            pl.col("valid_fuel")
+            .shift(-25)
+            .rolling_median(window_size=20, min_samples=10)
+            .alias("improved_after_avg_25"),
+        ).with_columns(
+            pl.when(
+                (pl.col("improved_after_avg_100").is_not_null())
+                & (pl.col("improved_after_avg_100") <= CAPACITY)
+            )
+            .then(pl.col("improved_after_avg_100"))
+            .when(
+                (pl.col("improved_after_avg_50").is_not_null())
+                & (pl.col("improved_after_avg_50") <= CAPACITY)
+            )
+            .then(pl.col("improved_after_avg_50"))
+            .when(
+                (pl.col("improved_after_avg_25").is_not_null())
+                & (pl.col("improved_after_avg_25") <= CAPACITY)
+            )
+            .then(pl.col("improved_after_avg_25"))
+            .otherwise(None)
+            .alias("best_improved_after_avg")
         )
 
-        # Paso 2: filtrar solo registros con is_anomaly == True
-        anomalies_df = anomalies_df.filter(
-            (pl.col("is_anomaly") == True) & (pl.col("delta_fuel_anomaly") > 1000)
+        # Candidatos para mejora
+        improved_after_candidates = (
+            anomalies_df.filter(
+                (pl.col("best_improved_after_avg").is_not_null())
+                & (pl.col("best_improved_after_avg") > 2000)
+                & (pl.col("best_improved_after_avg") <= CAPACITY + 100)
+            )
+            .group_by("anomaly_group")
+            .agg(
+                pl.col("TimeStamp").first().alias("candidate_timestamp"),
+                pl.col("best_improved_after_avg")
+                .max()
+                .alias("best_improved_after_avg"),
+            )
+            .sort("candidate_timestamp")
         )
 
-        # Paso 3: obtener solo el primer timestamp por grupo
-        anomaly_onsets = anomalies_df.group_by("anomaly_group").agg(
-            pl.col("TimeStamp").first().alias("anomaly_onset_time"),
-            pl.col("delta_fuel_anomaly").first().alias("delta_fuel_anomaly"),
-        )
-
-        # Resultado final
-        anomaly_onsets = anomaly_onsets.sort("anomaly_onset_time")
-
-        # recarga continua
+        # Agrupación de eventos continuos
         refill_df = (
             refill_df.with_columns(
                 pl.col("TimeStamp")
@@ -327,9 +353,7 @@ class SensorDataEDA:
                 .alias("time_diff")
             )
             .with_columns(
-                pl.when(
-                    pl.col("time_diff") > 10800
-                )  # se agrupa datos con diferencia mayor a 3 horas
+                pl.when(pl.col("time_diff") > 10800)
                 .then(1)
                 .otherwise(0)
                 .cum_sum()
@@ -350,7 +374,7 @@ class SensorDataEDA:
             )
         )
 
-        # aux dataframe para calcular el delta_fuel en caso de ruido fuerte y el timestamp sin limpiar
+        # Corrección de delta_fuel con aux_df
         aux_df = (
             unfiltered_df.with_columns(
                 pl.col("valid_fuel")
@@ -368,11 +392,7 @@ class SensorDataEDA:
             .select(["TimeStamp", "after_aux", "before_aux", "calculated_delta"])
         )
 
-        # Hacer join con el dataframe filtrado
-        refill_df = refill_df.join(aux_df, on="TimeStamp", how="left")
-
-        # filtro final,  cuando ocurre fuerte ruido el delta debe volver a calcularse una vez mas en casos extremos
-        refill_df = refill_df.with_columns(
+        refill_df = refill_df.join(aux_df, on="TimeStamp", how="left").with_columns(
             pl.when(
                 (pl.col("delta_fuel") < 500)
                 & (pl.col("after_aux") > pl.col("before_aux") + 500)
@@ -382,44 +402,67 @@ class SensorDataEDA:
             .alias("delta_fuel")
         )
 
-        #################3
-        joined_df = refill_df.join(anomaly_onsets, how="cross").with_columns(
-            (pl.col("TimeStamp") - pl.col("anomaly_onset_time"))
-            .dt.total_seconds()
-            .alias("time_diff")
+        # Encontrar candidatos cercanos
+        joined_df_candidates = (
+            refill_df.join(improved_after_candidates, how="cross")
+            .with_columns(
+                (pl.col("TimeStamp") - pl.col("candidate_timestamp"))
+                .dt.total_seconds()
+                .alias("time_diff_candidate")
+            )
+            .filter(
+                (pl.col("time_diff_candidate") >= 0)
+                & (pl.col("time_diff_candidate") <= 14400)
+            )
         )
 
-        # Filtrar solo registros donde anomaly_onset_time es después o igual y dentro de 6h
-        joined_df = joined_df.filter(
-            (pl.col("time_diff") >= 0) & (pl.col("time_diff") <= 14400)
-        )
-
-        # Para cada TimeStamp de refill_df, obtener el anomaly_onset_time más cercano posterior
-        nearest_anomalies = (
-            joined_df.sort("time_diff")
+        nearest_candidates = (
+            joined_df_candidates.sort("time_diff_candidate")
             .group_by("TimeStamp")
-            .agg(pl.col("anomaly_onset_time").first().alias("nearest_anomaly_onset"))
+            .agg(
+                pl.col("candidate_timestamp")
+                .first()
+                .alias("nearest_candidate_timestamp"),
+                pl.col("best_improved_after_avg")
+                .first()
+                .alias("candidate_improved_after_avg"),
+            )
         )
 
-        # Hacer join de vuelta con refill_df y reemplazar el TimeStamp si hay un match cercano
-        refill_df = refill_df.join(
-            nearest_anomalies, on="TimeStamp", how="left"
-        ).with_columns(
-            pl.when(pl.col("nearest_anomaly_onset").is_not_null())
-            .then(pl.col("nearest_anomaly_onset"))
-            .otherwise(pl.col("TimeStamp"))
-            .alias("TimeStamp"),
+        # Unión y mejora de valores
+        refill_df = (
+            refill_df.join(nearest_candidates, on="TimeStamp", how="left")
+            .with_columns(
+                pl.when(
+                    (pl.col("candidate_improved_after_avg").is_not_null())
+                    & (pl.col("candidate_improved_after_avg") > pl.col("after_avg"))
+                    & (
+                        pl.col("candidate_improved_after_avg") - pl.col("after_avg")
+                        >= 200
+                    )
+                )
+                .then(pl.col("candidate_improved_after_avg"))
+                .otherwise(pl.col("after_avg"))
+                .alias("final_after_avg")
+            )
+            .with_columns(
+                (pl.col("final_after_avg") - pl.col("before_avg")).alias(
+                    "final_delta_fuel"
+                ),
+                pl.col("TimeStamp").alias("final_TimeStamp"),
+            )
         )
 
+        # Resultado final
         return (
-            refill_df.filter(pl.col("delta_fuel") > 500)
+            refill_df.filter(pl.col("final_delta_fuel") > 500)
             .select(
                 [
-                    "TimeStamp",
+                    pl.col("final_TimeStamp").alias("TimeStamp"),
                     "valid_fuel",
-                    "delta_fuel",
+                    pl.col("final_delta_fuel").alias("delta_fuel"),
                     "before_avg",
-                    "after_avg",
+                    pl.col("final_after_avg").alias("after_avg"),
                 ]
             )
             .sort("TimeStamp")
@@ -437,38 +480,7 @@ if __name__ == "__main__":
     print("=" * 50)
 
     # 1. Filtrar y procesar cada camión individualmente
-    TRUCKS: set[str] = {
-        "T-210",
-        "T-211",
-        "T-212",
-        "T-213",
-        "T-214",
-        "T-215",
-        "T-216",
-        "T-217",
-        "T-218",
-        "T-219",
-        "T-220",
-        "T-221",
-        "T-222",
-        "T-223",
-        "T-224",
-        "T-225",
-        "T-230",
-        "T-231",
-        "T-232",
-        "T-233",
-        "T-234",
-        "T-235",
-        "T-236",
-        "T-237",
-        "T-238",
-        "T-239",
-        "T-240",
-        "T-241",
-        "T-242",
-        "T-243",
-    }
+    TRUCKS: set[str] = {"T-220"}
     # agregacion manual
     manual_refill: pl.DataFrame = pl.DataFrame(
         {

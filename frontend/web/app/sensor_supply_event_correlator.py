@@ -440,15 +440,22 @@ class SensorSupplyEventCorrelator:
     def correlate_anomalies(
         self, df: pl.DataFrame, adjustments: dict[str, tuple[float, float]]
     ) -> pl.DataFrame:
-        # Separar eventos
-        supplies = df.filter(pl.col("event_type") == "Supply_Only")
-        refills = df.filter(pl.col("event_type") == "Refill_Only")
+        print(f"🔍 INICIO - DataFrame total: {df.height} registros")
+
+        # Asignar índices únicos
+        supplies = df.filter(pl.col("event_type") == "Supply_Only").with_row_index(
+            "supply_idx"
+        )
+        refills = df.filter(pl.col("event_type") == "Refill_Only").with_row_index(
+            "refill_idx"
+        )
         both = df.filter(pl.col("event_type") == "Both_Events")
 
         if refills.is_empty() or supplies.is_empty():
             return df
-        # Join cruzado y filtrar por ventana de tiempo y mismo camión
-        joined: pl.DataFrame = (
+
+        # Join cruzado con ventana de +/- 12 horas
+        joined = (
             refills.join(supplies, how="cross", suffix="_supply")
             .filter(
                 (
@@ -466,65 +473,96 @@ class SensorSupplyEventCorrelator:
                 .dt.total_seconds()
                 .alias("abs_time_diff")
             )
+            .sort("abs_time_diff")
         )
 
-        # Elegir el match más cercano por refill
-        best_matches: pl.DataFrame = joined.sort("abs_time_diff").unique(
-            subset=["RefillTimeStamp"]
-        )
+        # Greedy matching uno a uno
+        matched_refill_idxs = set()
+        matched_supply_idxs = set()
+        best_matches_list = []
 
-        # Completar columnas de supply en los refill
-        completed: pl.DataFrame = (
-            best_matches.select(
-                [
-                    "RefillTimeStamp",
-                    "delta_fuel",
-                    "before_avg",
-                    "after_avg",
-                    pl.col("Origin_supply").alias("Origin"),
-                    pl.col("SupplyTimeStamp_supply").alias("SupplyTimeStamp"),
-                    pl.col("FuelLevelLiters_supply").alias("FuelLevelLiters"),
-                    pl.col("truck_id"),
-                ]
-            )
-            .with_columns(
-                pl.when(pl.col("delta_fuel") > pl.col("FuelLevelLiters"))
-                .then(
-                    pl.col("delta_fuel")
-                    - pl.lit(adjustments.get("truck_id", (0.0, 0.0))[0])
+        for row in joined.iter_rows(named=True):
+            ridx = row["refill_idx"]
+            sidx = row["supply_idx"]
+            if ridx not in matched_refill_idxs and sidx not in matched_supply_idxs:
+                best_matches_list.append(row)
+                matched_refill_idxs.add(ridx)
+                matched_supply_idxs.add(sidx)
+
+        # Generar DataFrame de matches
+        if best_matches_list:
+            best_matches = pl.DataFrame(best_matches_list)
+
+            completed = (
+                best_matches.select(
+                    [
+                        "RefillTimeStamp",
+                        "delta_fuel",
+                        "before_avg",
+                        "after_avg",
+                        pl.col("Origin_supply").alias("Origin"),
+                        pl.col("SupplyTimeStamp_supply").alias("SupplyTimeStamp"),
+                        pl.col("FuelLevelLiters_supply").alias("FuelLevelLiters"),
+                        "truck_id",
+                    ]
                 )
-                .when(pl.col("delta_fuel") < pl.col("FuelLevelLiters"))
-                .then(
-                    pl.col("delta_fuel")
-                    + pl.lit(adjustments.get("truck_id", (0.0, 0.0))[1])
+                .with_columns(
+                    pl.when(pl.col("delta_fuel") > pl.col("FuelLevelLiters"))
+                    .then(
+                        pl.col("delta_fuel")
+                        - pl.lit(adjustments.get("truck_id", (0.0, 0.0))[0])
+                    )
+                    .when(pl.col("delta_fuel") < pl.col("FuelLevelLiters"))
+                    .then(
+                        pl.col("delta_fuel")
+                        + pl.lit(adjustments.get("truck_id", (0.0, 0.0))[1])
+                    )
+                    .otherwise(pl.col("delta_fuel"))
                 )
-                .otherwise(pl.col("delta_fuel"))
+                .with_columns(
+                    (pl.col("RefillTimeStamp") - pl.col("SupplyTimeStamp"))
+                    .abs()
+                    .dt.total_seconds()
+                    .alias("time_discrepancy"),
+                    (pl.col("delta_fuel") - pl.col("FuelLevelLiters"))
+                    .abs()
+                    .alias("fuel_discrepancy"),
+                    pl.when(pl.col("RefillTimeStamp") >= pl.col("SupplyTimeStamp"))
+                    .then(pl.lit("TSNormal"))
+                    .otherwise(pl.lit("TSAtrasado"))
+                    .alias("classification"),
+                    pl.lit("Both_Events").alias("event_type"),
+                )
             )
-            .with_columns(
-                (pl.col("RefillTimeStamp") - pl.col("SupplyTimeStamp"))
-                .abs()
-                .dt.total_seconds()
-                .alias("time_discrepancy"),
-                (pl.col("delta_fuel") - pl.col("FuelLevelLiters"))
-                .abs()
-                .alias("fuel_discrepancy"),
-                pl.when(pl.col("RefillTimeStamp") >= pl.col("SupplyTimeStamp"))
-                .then(pl.lit("TSNormal"))
-                .otherwise(pl.lit("TSAtrasado"))
-                .alias("classification"),
-                pl.lit("Both_Events").alias("event_type"),
+        else:
+            completed = pl.DataFrame(
+                schema={
+                    "RefillTimeStamp": pl.Datetime,
+                    "delta_fuel": pl.Float64,
+                    "before_avg": pl.Float64,
+                    "after_avg": pl.Float64,
+                    "Origin": pl.Utf8,
+                    "SupplyTimeStamp": pl.Datetime,
+                    "FuelLevelLiters": pl.Float64,
+                    "time_discrepancy": pl.Float64,
+                    "fuel_discrepancy": pl.Float64,
+                    "classification": pl.Utf8,
+                    "event_type": pl.Utf8,
+                    "truck_id": pl.Utf8,
+                }
             )
+
+        # Obtener unmatched usando los índices
+        unmatched_supplies = supplies.join(
+            pl.DataFrame({"supply_idx": list(matched_supply_idxs)}),
+            on="supply_idx",
+            how="anti",
         )
 
-        # Excluir los que ya fueron emparejados
-        matched_refills = completed.select("RefillTimeStamp").to_series()
-        matched_supplies = completed.select("SupplyTimeStamp").to_series()
-
-        unmatched_refills = refills.filter(
-            ~pl.col("RefillTimeStamp").is_in(matched_refills.implode())
-        )
-        unmatched_supplies = supplies.filter(
-            ~pl.col("SupplyTimeStamp").is_in(matched_supplies.implode())
+        unmatched_refills = refills.join(
+            pl.DataFrame({"refill_idx": list(matched_refill_idxs)}),
+            on="refill_idx",
+            how="anti",
         )
 
         columns_to_select = [
@@ -542,7 +580,6 @@ class SensorSupplyEventCorrelator:
             "truck_id",
         ]
 
-        # Concatenar todo
         final_df = pl.concat(
             [
                 both.select(columns_to_select),
@@ -609,18 +646,6 @@ class SensorSupplyEventCorrelator:
             )
         ).select(columns_to_select)
 
-        # Eliminar falsos positivos de eventos de recarga
-        """ filtered_df = filtered_df.filter(
-            ~(
-                (pl.col("truck_id") == "T-221")
-                & (
-                    pl.col("RefillTimeStamp") == datetime(2024, 3, 12, 17, 49, 0)
-                )  # 2024-03-12T17:49:00.000000
-                & (pl.col("delta_fuel") == 521.6)
-                & (pl.col("before_avg") == 2546.56)
-                & (pl.col("after_avg") == 3068.16)
-            )
-        ) """
         return filtered_df
 
     def get_result(self) -> Optional[pl.DataFrame]:
