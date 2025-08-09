@@ -19,7 +19,8 @@ def unify_dataframes(
     """
     Unifica los dataframes de diferentes fuentes en base al timestamp de los sensores.
     Lógica de unión:
-    - Para time_model y fuel_supply: última entrada <= timestamp del sensor
+    - Para time_model: última entrada <= timestamp del sensor
+    - Para fuel_supply: último registro por equipo (sin restricción temporal)
     - Para cycle: ciclo activo donde E_TravelingStart <= timestamp del sensor
     """
 
@@ -116,6 +117,24 @@ def unify_dataframes(
         print("❌ No hay registros válidos en df_cycle después de limpiar nulls")
         return pl.DataFrame()
 
+    # Diagnóstico de rangos temporales
+    print("🔍 Diagnóstico de rangos temporales:")
+    sensor_min_time = df_sensor["TimeStamp"].min()
+    sensor_max_time = df_sensor["TimeStamp"].max()
+    fuel_min_time = df_fuel_supply["TimeStamp"].min()
+    fuel_max_time = df_fuel_supply["TimeStamp"].max()
+
+    print(f"  Rango temporal sensor: {sensor_min_time} a {sensor_max_time}")
+    print(f"  Rango temporal fuel_supply: {fuel_min_time} a {fuel_max_time}")
+
+    # Verificar si hay gap temporal
+    if fuel_max_time < sensor_min_time:
+        gap_days = (sensor_min_time - fuel_max_time).days
+        print(
+            f"  ⚠️ GAP TEMPORAL: {gap_days} días entre último fuel_supply y primer sensor"
+        )
+        print("  📝 Aplicando estrategia de último registro por equipo")
+
     print("🔗 Iniciando uniones...")
 
     # 1. Unión con time_model (último registro <= timestamp del sensor)
@@ -129,16 +148,36 @@ def unify_dataframes(
     )
     print(f"     Registros después de unión time_model: {len(df_unified)}")
 
-    # 2. Unión con fuel_supply (último registro <= timestamp del sensor)
-    print("  2️⃣ Uniendo con fuel_supply...")
-    df_unified = df_unified.join_asof(
-        df_fuel_supply.sort("TimeStamp"),  # Asegurar ordenamiento
-        on="TimeStamp",
-        by=["Equipment", "TruckFleet", "ShiftDate", "Shift"],
-        strategy="backward",
+    # 2. Unión con fuel_supply (último registro por equipo - SIN restricción temporal)
+    print("  2️⃣ Uniendo con fuel_supply (último registro por equipo)...")
+
+    # Obtener el último registro de fuel_supply por equipo
+    latest_fuel_supply = (
+        df_fuel_supply.sort("TimeStamp", descending=True)
+        .group_by(["Equipment", "TruckFleet"])
+        .agg(
+            pl.all().first()
+        )  # Toma el primer registro (que es el más reciente tras el sort)
+    )
+
+    print(f"     Registros únicos de fuel_supply por equipo: {len(latest_fuel_supply)}")
+
+    df_unified = df_unified.join(
+        latest_fuel_supply,
+        on=["Equipment", "TruckFleet"],
+        how="left",
         suffix="_fuel_supply",
     )
+
+    # Verificar éxito de la unión
+    fuel_supply_data_count = df_unified["FuelLevelLiters_fuel_supply"].null_count()
+    total_records = len(df_unified)
+    success_rate = ((total_records - fuel_supply_data_count) / total_records) * 100
+
     print(f"     Registros después de unión fuel_supply: {len(df_unified)}")
+    print(
+        f"     Registros con datos de fuel_supply: {total_records - fuel_supply_data_count}/{total_records} ({success_rate:.1f}%)"
+    )
 
     # 3. Unión con cycle (ciclo activo en el momento del sensor)
     print("  3️⃣ Uniendo con cycle...")
@@ -179,6 +218,17 @@ def unify_dataframes(
         )
         raise
 
+    # Verificación final
+    print("🔍 Verificación final de datos:")
+    fuel_final_nulls = df_unified["FuelLevelLiters_fuel_supply"].null_count()
+    fuel_final_success = ((len(df_unified) - fuel_final_nulls) / len(df_unified)) * 100
+    print(f"  Datos de fuel_supply completos: {fuel_final_success:.1f}%")
+
+    if fuel_final_nulls > 0:
+        print(f"  ⚠️ Aún hay {fuel_final_nulls} registros sin datos de fuel_supply")
+    else:
+        print("  ✅ Todos los registros tienen datos de fuel_supply")
+
     return df_unified
 
 
@@ -214,6 +264,13 @@ def main():
         print(f"  Cycle E_TravelingStart: {df_cycle['E_TravelingStart'].dtype}")
         print(f"  Cycle L_UnloadingEnd: {df_cycle['L_UnloadingEnd'].dtype}")
 
+        # Debug: Verificar cantidades de registros
+        print("🔍 Cantidades de registros por fuente:")
+        print(f"  Sensor: {len(df_sensor)} registros")
+        print(f"  Time Model: {len(df_time_model)} registros")
+        print(f"  Fuel Supply: {len(df_fuel_supply)} registros")
+        print(f"  Cycle: {len(df_cycle)} registros")
+
         # Unificar dataframes
         unified_df = unify_dataframes(
             df_sensor=df_sensor,
@@ -221,6 +278,26 @@ def main():
             df_fuel_supply=df_fuel_supply,
             df_cycle=df_cycle,
         )
+
+        if len(unified_df) == 0:
+            print(
+                "❌ No se pudieron unificar datos. Verificar compatibilidad de fuentes."
+            )
+            return
+
+        # Mostrar muestra de datos unificados
+        print("🔍 Muestra de datos unificados (primeras 3 filas):")
+        sample_columns = [
+            "TimeStamp",
+            "Equipment",
+            "FuelLevel",
+            "Speed",
+            "FuelLevelLiters_fuel_supply",
+            "Status",
+            "Shovel",
+        ]
+        available_columns = [col for col in sample_columns if col in unified_df.columns]
+        print(unified_df.select(available_columns).head(3))
 
         # Guardar en CSV
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -231,6 +308,20 @@ def main():
 
         print(f"✅ Datos unificados guardados en: {output_filename}")
         print(f"📊 Total de registros: {len(unified_df)}")
+        print(f"📊 Total de columnas: {len(unified_df.columns)}")
+
+        # Estadísticas finales
+        print("\n📈 Estadísticas de completitud:")
+        fuel_nulls = unified_df["FuelLevelLiters_fuel_supply"].null_count()
+        fuel_completeness = ((len(unified_df) - fuel_nulls) / len(unified_df)) * 100
+        print(f"  Datos de fuel_supply: {fuel_completeness:.1f}% completos")
+
+        if "Status" in unified_df.columns:
+            status_nulls = unified_df["Status"].null_count()
+            status_completeness = (
+                (len(unified_df) - status_nulls) / len(unified_df)
+            ) * 100
+            print(f"  Datos de time_model: {status_completeness:.1f}% completos")
 
     except Exception as e:
         print(f"❌ Error: {str(e)}")

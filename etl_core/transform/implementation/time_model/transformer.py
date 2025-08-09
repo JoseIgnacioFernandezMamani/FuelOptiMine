@@ -15,14 +15,9 @@ class TimeModelTransformer(BaseTransformer):
             {
                 "categorical_empty_fixed": 0,
                 "negative_durations_fixed": 0,
-                "invalid_status_combinations": 0,
             }
         )
-        self.categorical_columns = [
-            "Shift",
-            "TruckFleet",
-            "Event",
-        ]
+        self.categorical_columns = ["Shift", "TruckFleet"]
 
     @property
     def mandatory_columns(self) -> List[str]:
@@ -52,9 +47,6 @@ class TimeModelTransformer(BaseTransformer):
         self._count_categorical_fixes(df)
         self._count_duration_fixes(df)
 
-        # 4. Apply filters without adding columns
-        df = self._apply_filters(df)
-
         # 5. Update final metrics
         self.metrics["after_transform_records"] = df.height
         if self.metrics["initial_records"] > 0:
@@ -64,6 +56,41 @@ class TimeModelTransformer(BaseTransformer):
 
         # 6. Sort results
         return df.sort("ShiftDate", "TimeStamp")
+
+    def normalize_text(self, expr: pl.Expr) -> pl.Expr:
+        """Centralized text normalization function"""
+        # Encoding correction
+        corrections: dict[str, str] = {
+            "Ã¡": "a",
+            "Ã©": "e",
+            "Ã³": "o",
+            "Ãº": "u",
+            "Ã±": "n",
+            "Ã": "a",
+            "â€": "",
+        }
+        for wrong, right in corrections.items():
+            expr = expr.str.replace(wrong, right, literal=True)
+
+        # Remove accents
+        accents: dict[str, str] = {
+            "á": "a",
+            "é": "e",
+            "í": "i",
+            "ó": "o",
+            "ú": "u",
+            "ñ": "n",
+            "Á": "A",
+            "É": "E",
+            "Í": "I",
+            "Ó": "O",
+            "Ú": "U",
+            "Ñ": "N",
+        }
+        for accent, replacement in accents.items():
+            expr = expr.str.replace(accent, replacement, literal=True)
+
+        return expr.str.to_uppercase()
 
     def _get_categorical_normalization_exprs(self) -> list[pl.Expr]:
         """Basic normalization for categorical fields"""
@@ -105,66 +132,79 @@ class TimeModelTransformer(BaseTransformer):
             r"(?i)reserva": "RESERVA",
         }
 
-        def normalize_text(expr: pl.Expr) -> pl.Expr:
-            # Encoding correction
-            corrections: dict[str, str] = {
-                "Ã¡": "a",
-                "Ã©": "e",
-                "Ã³": "o",
-                "Ãº": "u",
-                "Ã±": "n",
-                "Ã": "a",
-                "â€": "",
-            }
-            for wrong, right in corrections.items():
-                expr = expr.str.replace(wrong, right, literal=True)
-
-            # Remove accents
-            accents: dict[str, str] = {
-                "á": "a",
-                "é": "e",
-                "í": "i",
-                "ó": "o",
-                "ú": "u",
-                "ñ": "n",
-                "Á": "A",
-                "É": "E",
-                "Í": "I",
-                "Ó": "O",
-                "Ú": "U",
-                "Ñ": "N",
-            }
-            for accent, replacement in accents.items():
-                expr = expr.str.replace(accent, replacement, literal=True)
-
-            return expr.str.to_uppercase()
+        event_mapping: dict[str, str] = {
+            r"(?i)inspección": "INSPECCION",
+            r"(?i)voladura": "VOLADURA",
+            r"(?i)reunión": "REUNION",
+            r"(?i)capacitación": "CAPACITACION",
+            r"(?i)condiciones climáticas": "CLIMA",
+            r"(?i)después de mtto": "POST_MANTENIMIENTO",
+            r"(?i)disip.*gases": "DISIPACION_GASES",
+            r"(?i)obstrucción de vía": "OBSTRUCCION_VIA",
+            r"(?i)topografía": "TOPOGRAFIA",
+            r"(?i)challa": "CHALLA",
+            r"(?i)empantanado": "EMPANTANADO",
+            r"(?i)rev[ií]sión médica": "REVISION_MEDICA",
+            r"(?i)almuerzo/cena": "ALMUERZO",
+            r"(?i)punto entel \(wc\)": "WC_ENTEL",
+            r"(?i)esperando.*pala": "ESPERANDO_PALA",
+            r"(?i)esperando.*cam[ií]ón": "ESPERANDO_CAMION",
+            r"(?i)falla hxgn.*oas": "FALLA_OAS",
+            r"(?i)falla hxgn.*fms": "FALLA_FMS",
+            r"(?i)falla hxgn.*cas10": "FALLA_CAS10",
+            r"(?i)falla.*i-track": "FALLA_ITRACK",
+            r"(?i)traslado": "TRASLADO",
+            r"(?i)relleno.*combustible": "RELLENO_COMBUSTIBLE",
+            r"(?i)cambio.*operador": "CAMBIO_OPERADOR",
+            r"(?i)cambio.*turno": "CAMBIO_TURNO",
+            r"(?i)sin asignación": "SIN_ASIGNACION",
+            r"(?i)restricci[oó]n.*voladura": "RESTRICCION_VOLADURA",
+            r"(?i)taponamiento": "TAPONAMIENTO",
+            r"(?i)c[oó]digo.*eliminado|999": "ELIMINADO",
+        }
 
         return [
             # Status normalization
             pl.coalesce(
                 *[
                     pl.when(
-                        normalize_text(pl.col("Status")).str.contains(pattern)
+                        self.normalize_text(pl.col("Status")).str.contains(pattern)
                     ).then(pl.lit(value))
                     for pattern, value in status_mapping.items()
                 ],
-                normalize_text(pl.col("Status"))
+                self.normalize_text(pl.col("Status"))
             ).alias("Status"),
             # Category normalization
             pl.coalesce(
                 *[
                     pl.when(
-                        normalize_text(pl.col("Category")).str.contains(pattern)
+                        self.normalize_text(pl.col("Category")).str.contains(pattern)
                     ).then(pl.lit(value))
                     for pattern, value in category_mapping.items()
                 ],
-                normalize_text(pl.col("Category"))
+                self.normalize_text(pl.col("Category"))
             ).alias("Category"),
+            # Event normalization
+            pl.coalesce(
+                *[
+                    pl.when(
+                        self.normalize_text(pl.col("Event")).str.contains(pattern)
+                    ).then(
+                        self.normalize_text(pl.col("Event")).str.replace(pattern, value)
+                    )
+                    for pattern, value in event_mapping.items()
+                ],
+                self.normalize_text(pl.col("Event"))
+            ).alias("Event"),
         ]
 
     def _count_categorical_fixes(self, df: pl.DataFrame) -> None:
         """Count corrections in categorical fields"""
-        all_categorical: list[str] = self.categorical_columns + ["Status", "Category"]
+        all_categorical: list[str] = self.categorical_columns + [
+            "Status",
+            "Category",
+            "Event",
+        ]
         for col in all_categorical:
             if col in df.columns:
                 null_count: int = df.filter(
@@ -177,17 +217,3 @@ class TimeModelTransformer(BaseTransformer):
         if "RecordDuration" in df.columns:
             negative_count: int = df.filter(pl.col("RecordDuration") < 0).height
             self.metrics["negative_durations_fixed"] += negative_count
-
-    def _apply_filters(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Filter invalid combinations without adding columns"""
-        before_filter: int = df.height
-
-        invalid_combinations: Expr = (pl.col("Status") == "OPERATIVO") & (
-            pl.col("Category").is_in(["D_NO_PROGRAMADA", "D_PROGRAMADA"])
-        ) | (pl.col("Status") == "MANTENIMIENTO") & (
-            ~pl.col("Category").str.contains("MANTENIMIENTO")
-        )
-
-        df = df.filter(~invalid_combinations)
-        self.metrics["invalid_status_combinations"] = before_filter - df.height
-        return df

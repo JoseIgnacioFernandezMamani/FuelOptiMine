@@ -388,8 +388,59 @@ class SensorSupplyEventCorrelator:
             .alias("event_type"),
         )
 
-        subtract_value, add_value = self._calculate_optimal_adjustment(initial_df)
+        # ajuste de fuellevelliters
+        initial_df = (
+            initial_df.with_columns(
+                (pl.col("FuelLevelLiters") - pl.col("after_avg"))
+                .abs()
+                .alias("distance_after"),
+                (pl.col("FuelLevelLiters") - pl.col("before_avg"))
+                .abs()
+                .alias("distance_before"),
+                (pl.col("FuelLevelLiters") - pl.col("delta_fuel"))
+                .abs()
+                .alias("distance_delta"),
+            )
+            .with_columns(
+                pl.when(
+                    # Condiciones básicas de disponibilidad
+                    (pl.col("delta_fuel").is_not_null())
+                    & (pl.col("FuelLevelLiters").is_not_null())
+                    & (pl.col("after_avg").is_not_null())
+                    & (pl.col("before_avg").is_not_null())
+                    & (pl.col("distance_after") < pl.col("distance_before"))
+                    & (pl.col("distance_after") < pl.col("distance_delta"))
+                )
+                .then(pl.col("after_avg"))
+                .when(
+                    (pl.col("delta_fuel").is_not_null())
+                    & (pl.col("FuelLevelLiters").is_not_null())
+                    & (pl.col("after_avg").is_not_null())
+                    & (pl.col("before_avg").is_not_null())
+                    & (pl.col("distance_before") < pl.col("distance_after"))
+                    & (pl.col("distance_before") < pl.col("distance_delta"))
+                )
+                .then(pl.col("before_avg"))
+                .otherwise(pl.col("delta_fuel"))
+                .alias("delta_fuel")
+            )
+            .with_columns(
+                pl.when(
+                    (pl.col("delta_fuel").is_not_null())
+                    & (pl.col("FuelLevelLiters").is_not_null())
+                )
+                .then((pl.col("delta_fuel") - pl.col("FuelLevelLiters")).abs())
+                .otherwise(pl.col("fuel_discrepancy"))
+                .alias("fuel_discrepancy")
+            )
+        )
+
+        # subtract_value, add_value = self._calculate_optimal_adjustment(initial_df)
+        subtract_value, add_value = (0, 0)
         self.ajust_truck[self.truck_id] = (subtract_value, add_value)
+
+        # umbral de proximidad
+        proximity_threshold: float = 150  # litros
 
         self.merged_df = initial_df.with_columns(
             # Aplicar ajuste solo donde delta_fuel es menor a registros
@@ -397,12 +448,20 @@ class SensorSupplyEventCorrelator:
                 (pl.col("delta_fuel").is_not_null())
                 & (pl.col("FuelLevelLiters").is_not_null())
                 & (pl.col("delta_fuel") < pl.col("FuelLevelLiters"))
+                & (
+                    (pl.col("FuelLevelLiters") - pl.col("delta_fuel"))
+                    >= proximity_threshold
+                )
             )
             .then(pl.col("delta_fuel") + add_value)
             .when(
                 (pl.col("delta_fuel").is_not_null())
                 & (pl.col("FuelLevelLiters").is_not_null())
                 & (pl.col("delta_fuel") > pl.col("FuelLevelLiters"))
+                & (
+                    (pl.col("delta_fuel") - pl.col("FuelLevelLiters"))
+                    >= proximity_threshold
+                )
             )
             .then(pl.col("delta_fuel") - subtract_value)
             .otherwise(pl.col("delta_fuel"))
@@ -460,11 +519,11 @@ class SensorSupplyEventCorrelator:
             .filter(
                 (
                     pl.col("SupplyTimeStamp_supply")
-                    >= pl.col("RefillTimeStamp") - pl.duration(hours=12)
+                    >= pl.col("RefillTimeStamp") - pl.duration(hours=24)
                 )
                 & (
                     pl.col("SupplyTimeStamp_supply")
-                    <= pl.col("RefillTimeStamp") + pl.duration(hours=12)
+                    <= pl.col("RefillTimeStamp") + pl.duration(hours=24)
                 )
             )
             .with_columns(
@@ -493,6 +552,15 @@ class SensorSupplyEventCorrelator:
         if best_matches_list:
             best_matches = pl.DataFrame(best_matches_list)
 
+            # Ajustar delta_fuel según truck_id y ajustes
+            truck_id = (
+                best_matches["truck_id"][0]
+                if "truck_id" in best_matches.columns
+                else "default"
+            )
+            subtract_value, add_value = adjustments.get(truck_id, (0.0, 0.0))
+            proximity_threshold = 150  # Definir umbral de proximidad
+
             completed = (
                 best_matches.select(
                     [
@@ -507,19 +575,80 @@ class SensorSupplyEventCorrelator:
                     ]
                 )
                 .with_columns(
-                    pl.when(pl.col("delta_fuel") > pl.col("FuelLevelLiters"))
-                    .then(
-                        pl.col("delta_fuel")
-                        - pl.lit(adjustments.get("truck_id", (0.0, 0.0))[0])
-                    )
-                    .when(pl.col("delta_fuel") < pl.col("FuelLevelLiters"))
-                    .then(
-                        pl.col("delta_fuel")
-                        + pl.lit(adjustments.get("truck_id", (0.0, 0.0))[1])
-                    )
-                    .otherwise(pl.col("delta_fuel"))
+                    (pl.col("FuelLevelLiters") - pl.col("after_avg"))
+                    .abs()
+                    .alias("distance_after"),
+                    (pl.col("FuelLevelLiters") - pl.col("before_avg"))
+                    .abs()
+                    .alias("distance_before"),
+                    (pl.col("FuelLevelLiters") - pl.col("delta_fuel"))
+                    .abs()
+                    .alias("distance_delta"),
                 )
                 .with_columns(
+                    pl.when(
+                        # Condiciones básicas de disponibilidad
+                        (pl.col("delta_fuel").is_not_null())
+                        & (pl.col("FuelLevelLiters").is_not_null())
+                        & (pl.col("after_avg").is_not_null())
+                        & (pl.col("before_avg").is_not_null())
+                        & (pl.col("distance_after") < pl.col("distance_before"))
+                        & (pl.col("distance_after") < pl.col("distance_delta"))
+                    )
+                    .then(pl.col("after_avg"))
+                    .when(
+                        (pl.col("delta_fuel").is_not_null())
+                        & (pl.col("FuelLevelLiters").is_not_null())
+                        & (pl.col("after_avg").is_not_null())
+                        & (pl.col("before_avg").is_not_null())
+                        & (pl.col("distance_before") < pl.col("distance_after"))
+                        & (pl.col("distance_before") < pl.col("distance_delta"))
+                    )
+                    .then(pl.col("before_avg"))
+                    .otherwise(
+                        pl.col("delta_fuel")
+                    )  # Mantener original si ninguno es suficientemente cercano
+                    .alias("delta_fuel")
+                )
+                .with_columns(
+                    # Recalcular fuel_discrepancy después del ajuste conceptual
+                    pl.when(
+                        (pl.col("delta_fuel").is_not_null())
+                        & (pl.col("FuelLevelLiters").is_not_null())
+                    )
+                    .then((pl.col("delta_fuel") - pl.col("FuelLevelLiters")).abs())
+                    .otherwise(pl.lit(None))
+                    .alias("fuel_discrepancy_temp")
+                )
+                # SEGUNDA LÓGICA: Ajuste inteligente con proximity threshold
+                .with_columns(
+                    pl.when(
+                        # Caso 1: delta_fuel < FuelLevelLiters y diferencia >= threshold
+                        (pl.col("delta_fuel").is_not_null())
+                        & (pl.col("FuelLevelLiters").is_not_null())
+                        & (pl.col("delta_fuel") < pl.col("FuelLevelLiters"))
+                        & (
+                            (pl.col("FuelLevelLiters") - pl.col("delta_fuel"))
+                            >= proximity_threshold
+                        )
+                    )
+                    .then(pl.col("delta_fuel") + add_value)
+                    .when(
+                        # Caso 2: delta_fuel > FuelLevelLiters y diferencia >= threshold
+                        (pl.col("delta_fuel").is_not_null())
+                        & (pl.col("FuelLevelLiters").is_not_null())
+                        & (pl.col("delta_fuel") > pl.col("FuelLevelLiters"))
+                        & (
+                            (pl.col("delta_fuel") - pl.col("FuelLevelLiters"))
+                            >= proximity_threshold
+                        )
+                    )
+                    .then(pl.col("delta_fuel") - subtract_value)
+                    .otherwise(pl.col("delta_fuel"))  # Mantener valor si está cerca
+                    .alias("delta_fuel")
+                )
+                .with_columns(
+                    # Calcular métricas finales
                     (pl.col("RefillTimeStamp") - pl.col("SupplyTimeStamp"))
                     .abs()
                     .dt.total_seconds()
