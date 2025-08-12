@@ -97,15 +97,7 @@ def run_sensor_etl_pipeline() -> None:
 
         # 5. Show transformed data sample
         print("\n🔍 Transformed data sample (First 5 rows):")
-        sample_columns: list[str] = [
-            "TimeStamp",
-            "Speed",
-            "Latitude",
-            "Longitude",
-            "Elevation",
-            "DistanceTraveled",
-            "SlopePercent",
-        ]
+        sample_columns: list[str] = ["TimeStamp", "Speed", "Equipment", "TruckFleet"]
         print(df_clean.select(sample_columns).head(5))
 
     except Exception as e:

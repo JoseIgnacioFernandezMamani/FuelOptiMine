@@ -13,6 +13,7 @@ from polars import Expr
 import math
 
 
+## aplicarle la deteccion de eventos de recarga y finalmente el consumo estimado
 class SensorTransformer(BaseTransformer):
     """Optimized transformer for sensor data using Polars expressions"""
 
@@ -68,7 +69,7 @@ class SensorTransformer(BaseTransformer):
         # 6. Retornar solo las columnas del schema final que existan
         final_columns: list[str] = list(SensorSchema.model_fields.keys()) + [
             "DistanceTraveled",
-            "SlopePercent",
+            "SlopePercent",  # fuel_comsumion add
         ]
         available_columns: list[str] = [
             col for col in final_columns if col in df.columns

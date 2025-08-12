@@ -76,7 +76,6 @@ class FuelSupplyTransformer(BaseTransformer):
             self.metrics["final_data_percentage"] = round(
                 (df.height / self.metrics["initial_records"]) * 100, 2
             )
-
         return df.sort(["ShiftDate", "TimeStamp"])
 
     def _get_outlier_handling_exprs(self) -> List[pl.Expr]:
@@ -119,6 +118,16 @@ class FuelSupplyTransformer(BaseTransformer):
             & pl.col("FuelLevelLiters").is_not_null()
             & pl.col("FuelLevel").is_not_null()
         ).drop(["__valid_model", "__valid_origin"])
+
+        # convert model to standar
+        df = df.with_columns(
+            pl.col("TruckFleet")
+            .str.to_uppercase()
+            .str.strip_chars()
+            .str.replace_all(r"CAT\s*789C", "CAT 789C")
+            .str.replace_all(r"CAT\s*793D", "CAT 793D")
+            .alias("TruckFleet")
+        )
 
         self.metrics["invalid_truck_models"] = invalid_model_count
         self.metrics["invalid_origin_records"] = invalid_origin_count

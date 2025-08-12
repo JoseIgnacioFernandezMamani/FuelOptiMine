@@ -22,6 +22,7 @@ class CycleTransformer(BaseTransformer):
                 "negative_times_fixed": 0,
                 "invalid_tonnage_fixed": 0,
                 "datetime_parsing_errors": 0,
+                "expanded_records": 0,
             }
         )
 
@@ -74,21 +75,239 @@ class CycleTransformer(BaseTransformer):
         # 5. Apply filters and update metrics
         df = self._apply_filters(df)
 
-        # 6. Calculate derived fields
-        df = self._calculate_derived_fields(df)
+        # 6. Sort by shiftdate and Equipment before expansion
+        df = df.sort("E_TravelingStart")
 
-        # 7. Update final metrics
+        # 7. Expand cycles into stages
+        df = self._expand_cycles_to_stages(df)
+
+        # 8. Update final metrics
         self.metrics["after_transform_records"] = df.height
         if self.metrics["initial_records"] > 0:
             self.metrics["final_data_percentage"] = round(
                 (df.height / self.metrics["initial_records"]) * 100, 2
             )
 
-        # 8. Sort by ShiftDate and Equipment
-        df = df.sort("ShiftDate", "Equipment")
-
         return df
 
+    def _expand_cycles_to_stages(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Expand each cycle record into 8 stage records using vectorized operations"""
+
+        # Add a unique cycle identifier to maintain order
+        df = df.with_row_count("cycle_id")
+
+        # Create stage mappings as lists for vectorized processing
+        stage_types = [
+            "empty_traveling",
+            "waiting_empty",
+            "spotting_empty",
+            "material_loading",
+            "load_travel",
+            "load_waiting_queue",
+            "load_positioning",
+            "material_unloading",
+        ]
+        stage_sequences = [1, 2, 3, 4, 5, 6, 7, 8]
+        duration_cols = [
+            "TravelingEmpty",
+            "WaitingEmpty",
+            "SpottingEmpty",
+            "LoadingMaterial",
+            "Hauling",
+            "WaitingLoad",
+            "SpottingLoad",
+            "UnloadingMaterial",
+        ]
+        end_cols = [
+            "E_TravelingEnd",
+            "E_WaitingEnd",
+            "E_SpottingEnd",
+            "E_LoadingEnd",
+            "L_HaulingEnd",
+            "L_WaitingEnd",
+            "L_SpottingEnd",
+            "L_UnloadingEnd",
+        ]
+        categories = [
+            "empty",
+            "empty",
+            "empty",
+            "loading",
+            "loaded",
+            "loaded",
+            "loaded",
+            "unloading",
+        ]
+
+        # Create expanded DataFrame using explode
+        df_expanded = df.with_columns(
+            [
+                pl.lit(stage_types).alias("StageType"),
+                pl.lit(stage_sequences).alias("StageSequence"),
+                pl.lit(duration_cols).alias("duration_col_name"),
+                pl.lit(end_cols).alias("end_col_name"),
+                pl.lit(categories).alias("category"),
+            ]
+        ).explode(
+            [
+                "StageType",
+                "StageSequence",
+                "duration_col_name",
+                "end_col_name",
+                "category",
+            ]
+        )
+
+        # Create RecordDuration and TimeStamp using dynamic column selection
+        df_expanded = df_expanded.with_columns(
+            [
+                # Dynamic duration selection
+                pl.when(pl.col("duration_col_name") == "TravelingEmpty")
+                .then(pl.col("TravelingEmpty"))
+                .when(pl.col("duration_col_name") == "WaitingEmpty")
+                .then(pl.col("WaitingEmpty"))
+                .when(pl.col("duration_col_name") == "SpottingEmpty")
+                .then(pl.col("SpottingEmpty"))
+                .when(pl.col("duration_col_name") == "LoadingMaterial")
+                .then(pl.col("LoadingMaterial"))
+                .when(pl.col("duration_col_name") == "Hauling")
+                .then(pl.col("Hauling"))
+                .when(pl.col("duration_col_name") == "WaitingLoad")
+                .then(pl.col("WaitingLoad"))
+                .when(pl.col("duration_col_name") == "SpottingLoad")
+                .then(pl.col("SpottingLoad"))
+                .when(pl.col("duration_col_name") == "UnloadingMaterial")
+                .then(pl.col("UnloadingMaterial"))
+                .alias("RecordDuration"),
+                # Dynamic timestamp selection
+                pl.when(pl.col("end_col_name") == "E_TravelingEnd")
+                .then(pl.col("E_TravelingEnd"))
+                .when(pl.col("end_col_name") == "E_WaitingEnd")
+                .then(pl.col("E_WaitingEnd"))
+                .when(pl.col("end_col_name") == "E_SpottingEnd")
+                .then(pl.col("E_SpottingEnd"))
+                .when(pl.col("end_col_name") == "E_LoadingEnd")
+                .then(pl.col("E_LoadingEnd"))
+                .when(pl.col("end_col_name") == "L_HaulingEnd")
+                .then(pl.col("L_HaulingEnd"))
+                .when(pl.col("end_col_name") == "L_WaitingEnd")
+                .then(pl.col("L_WaitingEnd"))
+                .when(pl.col("end_col_name") == "L_SpottingEnd")
+                .then(pl.col("L_SpottingEnd"))
+                .when(pl.col("end_col_name") == "L_UnloadingEnd")
+                .then(pl.col("L_UnloadingEnd"))
+                .alias("TimeStamp"),
+            ]
+        )
+
+        # Apply conditional logic for each category using vectorized operations
+        df_result = df_expanded.with_columns(
+            [
+                # LoadingZone logic
+                pl.when(pl.col("category").is_in(["empty", "loading"]))
+                .then(pl.col("LoadingZone"))
+                .otherwise(pl.lit(None))
+                .alias("LoadingZone_final"),
+                # Material logic
+                pl.when(pl.col("category").is_in(["loading", "loaded", "unloading"]))
+                .then(pl.col("Material"))
+                .otherwise(pl.lit(None))
+                .alias("Material_final"),
+                # Tonnage logic
+                pl.when(pl.col("category").is_in(["loading", "loaded", "unloading"]))
+                .then(pl.col("MeasuredTonnage"))
+                .otherwise(pl.lit(None))
+                .alias("MeasuredTonnage_final"),
+                pl.when(pl.col("category").is_in(["loading", "loaded", "unloading"]))
+                .then(pl.col("ReportedTonnage"))
+                .otherwise(pl.lit(None))
+                .alias("ReportedTonnage_final"),
+                # Destination logic
+                pl.when(pl.col("category").is_in(["loading", "loaded", "unloading"]))
+                .then(pl.col("DestinationType"))
+                .otherwise(pl.lit(None))
+                .alias("DestinationType_final"),
+                pl.when(pl.col("category").is_in(["loading", "loaded", "unloading"]))
+                .then(pl.col("Destination"))
+                .otherwise(pl.lit(None))
+                .alias("Destination_final"),
+                # Distance logic
+                pl.when(pl.col("category") == "loading")
+                .then(pl.col("DistanceEmpty"))
+                .when(pl.col("category") == "unloading")
+                .then(pl.col("DistanceLoaded"))
+                .otherwise(pl.lit(None))
+                .alias("Distance"),
+                # Coordinates logic
+                pl.when(pl.col("category").is_in(["empty", "loading"]))
+                .then(pl.col("G_Latitude"))
+                .when(pl.col("category").is_in(["loaded", "unloading"]))
+                .then(pl.col("D_Latitude"))
+                .otherwise(pl.lit(None))
+                .alias("Latitude"),
+                pl.when(pl.col("category").is_in(["empty", "loading"]))
+                .then(pl.col("G_Longitude"))
+                .when(pl.col("category").is_in(["loaded", "unloading"]))
+                .then(pl.col("D_Longitude"))
+                .otherwise(pl.lit(None))
+                .alias("Longitude"),
+                pl.when(pl.col("category").is_in(["empty", "loading"]))
+                .then(pl.col("G_Elevation"))
+                .when(pl.col("category").is_in(["loaded", "unloading"]))
+                .then(pl.col("D_Elevation"))
+                .otherwise(pl.lit(None))
+                .alias("Elevation"),
+                # Derived fields
+                pl.when(pl.col("category") == "unloading")
+                .then(pl.col("MeasuredTonnage") / pl.col("RecordDuration"))
+                .otherwise(pl.lit(None))
+                .alias("TonnageEfficiency"),
+                pl.when(pl.col("category") == "loading")
+                .then(pl.col("DistanceEmpty") / pl.col("RecordDuration"))
+                .when(pl.col("category") == "unloading")
+                .then(pl.col("DistanceLoaded") / pl.col("RecordDuration"))
+                .otherwise(pl.lit(None))
+                .alias("AverageSpeed"),
+                ((pl.col("RecordDuration") / pl.col("TotalCycleTime")) * 100).alias(
+                    "TimeEfficiencyPercentage"
+                ),
+            ]
+        )
+
+        # Select final columns and filter valid records
+        final_df = df_result.select(
+            [
+                "ShiftDate",
+                "Shift",
+                "Shovel",
+                "ShovelModel",
+                "Equipment",
+                "TruckFleet",
+                "StageType",
+                "StageSequence",
+                "RecordDuration",
+                "TimeStamp",
+                pl.col("LoadingZone_final").alias("LoadingZone"),
+                pl.col("Material_final").alias("Material"),
+                pl.col("MeasuredTonnage_final").alias("MeasuredTonnage"),
+                pl.col("ReportedTonnage_final").alias("ReportedTonnage"),
+                pl.col("DestinationType_final").alias("DestinationType"),
+                pl.col("Destination_final").alias("Destination"),
+                "Distance",
+                "Latitude",
+                "Longitude",
+                "Elevation",
+                "TonnageEfficiency",
+                "AverageSpeed",
+                "TimeEfficiencyPercentage",
+                "cycle_id",
+            ]
+        ).sort("cycle_id", "StageSequence")
+
+        self.metrics["expanded_records"] = final_df.height
+        return final_df
+
+    ## antiguo
     def _get_categorical_normalization_exprs(self, df: pl.DataFrame) -> list[pl.Expr]:
         """Expressions for normalizing categorical fields"""
         categorical_columns: list[str] = [
@@ -258,6 +477,7 @@ class CycleTransformer(BaseTransformer):
             & pl.col(f"{prefix}Elevation").is_between(-1000, 8000)
         )
 
+    # delete after columns
     def _calculate_derived_fields(self, df: pl.DataFrame) -> pl.DataFrame:
         """Calculate derived fields like efficiency metrics"""
         return df.with_columns(
