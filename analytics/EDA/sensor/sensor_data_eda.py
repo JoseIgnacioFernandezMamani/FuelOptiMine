@@ -5,6 +5,7 @@ import polars as pl
 from pathlib import Path
 from typing import Any, Dict
 from analytics.EDA.config.settings import DATA_DIR, TRUCK_SPECS
+from etl_core.utils.equipment_constants import TRUCK_SPECS
 import numpy as np
 from datetime import datetime
 from typing import Optional

@@ -239,21 +239,21 @@ class CycleTransformer(BaseTransformer):
                 .otherwise(pl.lit(None))
                 .alias("Distance"),
                 # Coordinates logic
-                pl.when(pl.col("category").is_in(["empty", "loading"]))
+                pl.when(pl.col("category").is_in(["loading"]))
                 .then(pl.col("G_Latitude"))
-                .when(pl.col("category").is_in(["loaded", "unloading"]))
+                .when(pl.col("category").is_in(["unloading"]))
                 .then(pl.col("D_Latitude"))
                 .otherwise(pl.lit(None))
                 .alias("Latitude"),
-                pl.when(pl.col("category").is_in(["empty", "loading"]))
+                pl.when(pl.col("category").is_in(["loading"]))
                 .then(pl.col("G_Longitude"))
-                .when(pl.col("category").is_in(["loaded", "unloading"]))
+                .when(pl.col("category").is_in(["unloading"]))
                 .then(pl.col("D_Longitude"))
                 .otherwise(pl.lit(None))
                 .alias("Longitude"),
-                pl.when(pl.col("category").is_in(["empty", "loading"]))
+                pl.when(pl.col("category").is_in(["loading"]))
                 .then(pl.col("G_Elevation"))
-                .when(pl.col("category").is_in(["loaded", "unloading"]))
+                .when(pl.col("category").is_in(["unloading"]))
                 .then(pl.col("D_Elevation"))
                 .otherwise(pl.lit(None))
                 .alias("Elevation"),
@@ -274,8 +274,9 @@ class CycleTransformer(BaseTransformer):
             ]
         )
 
+        final_df = df_result.sort("cycle_id", "StageSequence")
         # Select final columns and filter valid records
-        final_df = df_result.select(
+        final_df = final_df.select(
             [
                 "ShiftDate",
                 "Shift",
@@ -302,7 +303,7 @@ class CycleTransformer(BaseTransformer):
                 "TimeEfficiencyPercentage",
                 "cycle_id",
             ]
-        ).sort("cycle_id", "StageSequence")
+        )
 
         self.metrics["expanded_records"] = final_df.height
         return final_df
@@ -356,7 +357,7 @@ class CycleTransformer(BaseTransformer):
             .alias("EquivalentDistance"),
             # Total cycle time outliers (more than 24 hours seems unrealistic)
             pl.when(
-                (pl.col("TotalCycleTime") < 0) | (pl.col("TotalCycleTime") > 1440)
+                (pl.col("TotalCycleTime") < 0) | (pl.col("TotalCycleTime") > 43200)
             )  # 1440 minutes = 24 hours
             .then(None)
             .otherwise(pl.col("TotalCycleTime"))
