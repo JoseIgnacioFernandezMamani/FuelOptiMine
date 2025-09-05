@@ -94,7 +94,7 @@ class CycleTransformer(BaseTransformer):
         """Expand each cycle record into 8 stage records using vectorized operations"""
 
         # Add a unique cycle identifier to maintain order
-        df = df.with_row_count("cycle_id")
+        df = df.with_row_count("CycleId")
 
         # Create stage mappings as lists for vectorized processing
         stage_types = [
@@ -274,10 +274,11 @@ class CycleTransformer(BaseTransformer):
             ]
         )
 
-        final_df = df_result.sort("cycle_id", "StageSequence")
+        final_df = df_result.sort("CycleId", "StageSequence")
         # Select final columns and filter valid records
         final_df = final_df.select(
             [
+                "CycleId",
                 "ShiftDate",
                 "Shift",
                 "Shovel",
@@ -301,7 +302,6 @@ class CycleTransformer(BaseTransformer):
                 "TonnageEfficiency",
                 "AverageSpeed",
                 "TimeEfficiencyPercentage",
-                "cycle_id",
             ]
         )
 

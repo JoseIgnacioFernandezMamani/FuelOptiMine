@@ -1,358 +1,413 @@
-import torch
-import torch.nn as nn
 import polars as pl
 import numpy as np
-from matplotlib import pyplot as plt
-from sklearn import linear_model
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, r2_score
-from pathlib import Path
-from typing import Tuple, Optional
-import logging
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
+import warnings
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+warnings.filterwarnings("ignore")
 
 
-class FuelLinearRegressionModel:
-    """
-    Clase para regresión lineal de combustible basada en delta_fuel y FuelLevelLiters.
-    Implementa tanto regresión lineal tradicional como RANSAC para manejar outliers.
-    """
-
-    def __init__(self, use_ransac: bool = True, random_state: int = 42):
+class FuelCycleRegressionAnalyzer:
+    def __init__(self, csv_file="unified_data_T-210.csv") -> None:
         """
-        Inicializa el modelo de regresión lineal.
-
-        Args:
-            use_ransac: Si usar RANSAC para manejo robusto de outliers
-            random_state: Semilla para reproducibilidad
+        Inicializa el analizador de ciclos de combustible
         """
-        self.use_ransac = use_ransac
-        self.random_state = random_state
-        self.lr_model = linear_model.LinearRegression()
-        self.ransac_model = (
-            linear_model.RANSACRegressor(random_state=random_state)
-            if use_ransac
-            else None
-        )
-        self.data = None
-        self.X_train = None
-        self.X_test = None
-        self.y_train = None
-        self.y_test = None
-        self.is_trained = False
+        self.csv_file = csv_file
+        self.data = pl.DataFrame()
+        self.cycles = {}
+        self.cycle_regressions = {}
+        self.cycle_metrics = {}
+        self.summary_stats = {}
 
-    def load_data(self, data_path: Path) -> pl.DataFrame:
+        # Variables independientes para la regresión
+        self.independent_vars = [
+            "DistanceTraveled",
+            "MeasuredTonnage",
+            "SpeedAvg",
+            "RPM",
+            "SlopePercent",
+            "Acceleration",
+            "Distance",
+        ]
+
+        # Variable dependiente
+        self.dependent_var = "FuelLevelLiters"
+
+        # Variables que indican inicio de nuevo ciclo
+        self.cycle_indicators = ["ValidFuel", "DeltaFuel", "BeforeAvg", "AfterAvg"]
+
+    def load_data(self):
         """
-        Carga los datos desde el archivo CSV usando Polars.
-
-        Args:
-            data_path: Ruta al archivo CSV
-
-        Returns:
-            DataFrame con los datos cargados
+        Carga los datos del archivo CSV
         """
+        print(f"Cargando datos desde {self.csv_file}...")
         try:
-            logger.info(f"Cargando datos desde: {data_path}")
-            self.data = pl.read_csv(data_path)
-            logger.info(
-                f"Datos cargados: {self.data.shape[0]} filas, {self.data.shape[1]} columnas"
-            )
-            return self.data
+            self.data = pl.read_csv(self.csv_file, try_parse_dates=True)
+            print(f"Datos cargados exitosamente: {len(self.data)} registros")
+            print(f"Columnas disponibles: {list(self.data.columns)}")
+            return True
+        except FileNotFoundError:
+            print(f"Error: No se pudo encontrar el archivo {self.csv_file}")
+            return False
         except Exception as e:
-            logger.error(f"Error cargando datos: {e}")
-            raise
+            print(f"Error al cargar datos: {str(e)}")
+            return False
 
-    def preprocess_data(
-        self, test_size: float = 0.2
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def identify_fuel_cycles(self):
         """
-        Preprocesa los datos para entrenamiento.
-
-        Args:
-            test_size: Proporción de datos para prueba
-
-        Returns:
-            Tupla con X_train, X_test, y_train, y_test
+        Identifica los ciclos de combustible basado en las variables indicadoras
         """
-        if self.data is None:
-            raise ValueError("Primero debe cargar los datos con load_data()")
+        print("\nIdentificando ciclos de combustible...")
 
-        # Filtrar datos válidos (no nulos)
-        clean_data = self.data.filter(
-            (pl.col("delta_fuel").is_not_null())
-            & (pl.col("FuelLevelLiters").is_not_null())
-            & (pl.col("delta_fuel") != 0)  # Evitar divisiones por cero
-            & (pl.col("FuelLevelLiters") > 0)  # Evitar valores negativos de combustible
+        # Convertir TimeStamp a datetime si existe
+        if "TimeStamp" in self.data.columns:
+            self.data["TimeStamp"] = pl.to_datetime(
+                self.data["TimeStamp"], errors="coerce"
+            )
+            self.data = self.data.sort_values("TimeStamp").reset_index(drop=True)
+
+        # Identificar inicios de ciclo (cuando todas las variables indicadoras no son null)
+        cycle_starts = self.data[
+            self.data[self.cycle_indicators].notna().all(axis=1)
+        ].index.tolist()
+
+        print(f"Encontrados {len(cycle_starts)} inicios de ciclo potenciales")
+
+        # Crear diccionario de ciclos
+        cycle_id = 0
+        for i, start_idx in enumerate(cycle_starts):
+            # Determinar fin del ciclo (siguiente inicio o final del dataset)
+            if i < len(cycle_starts) - 1:
+                end_idx = cycle_starts[i + 1] - 1
+            else:
+                end_idx = len(self.data) - 1
+
+            # Extraer datos del ciclo
+            cycle_data = self.data.iloc[start_idx : end_idx + 1].copy()
+
+            # Filtrar solo registros válidos con FuelLevelLiters
+            cycle_data = cycle_data.dropna(subset=[self.dependent_var])
+
+            # Verificar que el ciclo tenga suficientes datos (mínimo 5 registros)
+            if len(cycle_data) >= 5:
+                # Calcular duración del ciclo
+                if "TimeStamp" in cycle_data.columns:
+                    duration = (
+                        cycle_data["TimeStamp"].max() - cycle_data["TimeStamp"].min()
+                    ).total_seconds() / 3600  # horas
+                else:
+                    duration = (
+                        len(cycle_data) * 0.5 / 60
+                    )  # asumiendo 30 segundos por registro, convertir a horas
+
+                # Almacenar información del ciclo
+                self.cycles[cycle_id] = {
+                    "data": cycle_data,
+                    "start_idx": start_idx,
+                    "end_idx": end_idx,
+                    "duration_hours": duration,
+                    "initial_fuel": cycle_data[self.dependent_var].iloc[0],
+                    "final_fuel": cycle_data[self.dependent_var].iloc[-1],
+                    "fuel_consumed": cycle_data[self.dependent_var].iloc[0]
+                    - cycle_data[self.dependent_var].iloc[-1],
+                    "records_count": len(cycle_data),
+                }
+                cycle_id += 1
+
+        print(f"Ciclos válidos identificados: {len(self.cycles)}")
+        return len(self.cycles) > 0
+
+    def perform_cycle_regressions(self):
+        """
+        Realiza regresión lineal multivariable para cada ciclo
+        """
+        print("\nRealizando regresiones lineales por ciclo...")
+
+        successful_regressions = 0
+
+        for cycle_id, cycle_info in self.cycles.items():
+            cycle_data = cycle_info["data"]
+
+            # Preparar datos para regresión
+            # Variables independientes
+            X = cycle_data[self.independent_vars].copy()
+            # Variable dependiente
+            y = cycle_data[self.dependent_var].copy()
+
+            # Limpiar datos faltantes
+            mask = X.notna().all(axis=1) & y.notna()
+            X_clean = X[mask]
+            y_clean = y[mask]
+
+            # Verificar que tengamos suficientes datos
+            if len(X_clean) < 3:
+                print(f"Ciclo {cycle_id}: Datos insuficientes para regresión")
+                continue
+
+            try:
+                # Crear y entrenar modelo de regresión
+                model = LinearRegression()
+                model.fit(X_clean, y_clean)
+
+                # Realizar predicciones
+                y_pred = model.predict(X_clean)
+
+                # Calcular métricas
+                mse = mean_squared_error(y_clean, y_pred)
+                rmse = np.sqrt(mse)
+                mae = mean_absolute_error(y_clean, y_pred)
+                r2 = r2_score(y_clean, y_pred)
+
+                # Almacenar resultados
+                self.cycle_regressions[cycle_id] = {
+                    "model": model,
+                    "X_data": X_clean,
+                    "y_actual": y_clean,
+                    "y_predicted": y_pred,
+                    "coefficients": dict(zip(self.independent_vars, model.coef_)),
+                    "intercept": model.intercept_,
+                }
+
+                self.cycle_metrics[cycle_id] = {
+                    "mse": mse,
+                    "rmse": rmse,
+                    "mae": mae,
+                    "r2_score": r2,
+                    "data_points": len(X_clean),
+                    "duration_hours": cycle_info["duration_hours"],
+                    "fuel_consumed": cycle_info["fuel_consumed"],
+                    "consumption_rate": cycle_info["fuel_consumed"]
+                    / max(cycle_info["duration_hours"], 0.1),
+                }
+
+                successful_regressions += 1
+
+            except Exception as e:
+                print(f"Error en regresión del ciclo {cycle_id}: {str(e)}")
+                continue
+
+        print(
+            f"Regresiones completadas exitosamente: {successful_regressions}/{len(self.cycles)}"
         )
+        return successful_regressions > 0
 
-        logger.info(f"Datos después de limpieza: {clean_data.shape[0]} filas")
-
-        # Extraer características (X) y variable objetivo (y)
-        X = clean_data.select("delta_fuel").to_numpy()
-        y = clean_data.select("FuelLevelLiters").to_numpy().flatten()
-
-        # Dividir en entrenamiento y prueba
-        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            X, y, test_size=test_size, random_state=self.random_state
-        )
-
-        logger.info(f"Datos de entrenamiento: {self.X_train.shape[0]} muestras")
-        logger.info(f"Datos de prueba: {self.X_test.shape[0]} muestras")
-
-        return self.X_train, self.X_test, self.y_train, self.y_test
-
-    def train(self) -> dict:
+    def analyze_results(self):
         """
-        Entrena los modelos de regresión lineal.
-
-        Returns:
-            Diccionario con métricas de entrenamiento
+        Analiza los resultados de todas las regresiones
         """
-        if self.X_train is None:
-            raise ValueError("Primero debe preprocesar los datos con preprocess_data()")
+        print("\nAnalizando resultados de regresiones...")
 
-        logger.info("Iniciando entrenamiento...")
+        if not self.cycle_metrics:
+            print("No hay datos de métricas para analizar")
+            return
 
-        # Entrenar regresión lineal tradicional
-        self.lr_model.fit(self.X_train, self.y_train)
+        # Crear DataFrame con métricas de todos los ciclos
+        metrics_df = pl.DataFrame(self.cycle_metrics).T
 
-        # Entrenar RANSAC si está habilitado
-        if self.use_ransac and self.ransac_model is not None:
-            self.ransac_model.fit(self.X_train, self.y_train)
-
-        self.is_trained = True
-        logger.info("Entrenamiento completado")
-
-        # Calcular métricas de entrenamiento
-        metrics = self.evaluate()
-        return metrics
-
-    def predict(self, X: np.ndarray, use_ransac: bool = None) -> np.ndarray:
-        """
-        Realiza predicciones usando el modelo entrenado.
-
-        Args:
-            X: Datos de entrada (delta_fuel)
-            use_ransac: Si usar RANSAC (por defecto usa la configuración de la clase)
-
-        Returns:
-            Predicciones de FuelLevelLiters
-        """
-        if not self.is_trained:
-            raise ValueError("El modelo debe ser entrenado primero")
-
-        use_ransac = use_ransac if use_ransac is not None else self.use_ransac
-
-        if use_ransac and self.ransac_model is not None:
-            return self.ransac_model.predict(X)
-        else:
-            return self.lr_model.predict(X)
-
-    def evaluate(self) -> dict:
-        """
-        Evalúa el modelo en el conjunto de prueba.
-
-        Returns:
-            Diccionario con métricas de evaluación
-        """
-        if not self.is_trained:
-            raise ValueError("El modelo debe ser entrenado primero")
-
-        # Predicciones con regresión lineal
-        y_pred_lr = self.lr_model.predict(self.X_test)
-        mse_lr = mean_squared_error(self.y_test, y_pred_lr)
-        r2_lr = r2_score(self.y_test, y_pred_lr)
-
-        metrics = {
-            "linear_regression": {
-                "mse": mse_lr,
-                "r2": r2_lr,
-                "coef": self.lr_model.coef_[0],
-                "intercept": self.lr_model.intercept_,
-            }
+        # Estadísticas generales
+        self.summary_stats = {
+            "total_cycles": len(self.cycle_metrics),
+            "avg_r2_score": metrics_df["r2_score"].mean(),
+            "avg_rmse": metrics_df["rmse"].mean(),
+            "avg_duration": metrics_df["duration_hours"].mean(),
+            "avg_fuel_consumed": metrics_df["fuel_consumed"].mean(),
+            "avg_consumption_rate": metrics_df["consumption_rate"].mean(),
         }
 
-        # Métricas para RANSAC si está disponible
-        if self.use_ransac and self.ransac_model is not None:
-            y_pred_ransac = self.ransac_model.predict(self.X_test)
-            mse_ransac = mean_squared_error(self.y_test, y_pred_ransac)
-            r2_ransac = r2_score(self.y_test, y_pred_ransac)
+        # Análisis de coeficientes promedio
+        all_coefficients = {}
+        for cycle_id in self.cycle_regressions:
+            coeffs = self.cycle_regressions[cycle_id]["coefficients"]
+            for var, coeff in coeffs.items():
+                if var not in all_coefficients:
+                    all_coefficients[var] = []
+                all_coefficients[var].append(coeff)
 
-            metrics["ransac"] = {
-                "mse": mse_ransac,
-                "r2": r2_ransac,
-                "coef": self.ransac_model.estimator_.coef_[0],
-                "intercept": self.ransac_model.estimator_.intercept_,
-                "n_inliers": np.sum(self.ransac_model.inlier_mask_),
-                "n_outliers": np.sum(~self.ransac_model.inlier_mask_),
-            }
+        # Coeficientes promedio
+        avg_coefficients = {
+            var: np.mean(coeffs) for var, coeffs in all_coefficients.items()
+        }
+        self.summary_stats["avg_coefficients"] = avg_coefficients
 
-        return metrics
+        # Mostrar resultados
+        print("\n" + "=" * 50)
+        print("RESUMEN DE ANÁLISIS DE CICLOS DE COMBUSTIBLE")
+        print("=" * 50)
+        print(f"Total de ciclos analizados: {self.summary_stats['total_cycles']}")
+        print(f"R² promedio: {self.summary_stats['avg_r2_score']:.4f}")
+        print(f"RMSE promedio: {self.summary_stats['avg_rmse']:.2f} litros")
+        print(
+            f"Duración promedio de ciclo: {self.summary_stats['avg_duration']:.2f} horas"
+        )
+        print(
+            f"Combustible consumido promedio: {self.summary_stats['avg_fuel_consumed']:.2f} litros"
+        )
+        print(
+            f"Tasa de consumo promedio: {self.summary_stats['avg_consumption_rate']:.2f} litros/hora"
+        )
 
-    def plot_results(self, save_path: Optional[Path] = None):
+        print("\nCoeficientes promedio de regresión:")
+        print("-" * 40)
+        for var, coeff in avg_coefficients.items():
+            print(f"{var:15}: {coeff:8.4f}")
+
+        return metrics_df
+
+    def predict_fuel_consumption(
+        self,
+        distance_traveled=0,
+        measured_tonnage=0,
+        speed_avg=0,
+        rpm=0,
+        slope_percent=0,
+        acceleration=0,
+        distance=0,
+        duration_hours=1,
+    ):
         """
-        Visualiza los resultados de la regresión.
-
-        Args:
-            save_path: Ruta para guardar la gráfica (opcional)
+        Predice el consumo de combustible basado en los modelos entrenados
         """
-        if not self.is_trained:
-            raise ValueError("El modelo debe ser entrenado primero")
+        if not self.summary_stats:
+            print("Error: No hay modelos entrenados disponibles")
+            return None
 
-        # Combinar datos de entrenamiento y prueba para visualización completa
-        X_all = np.vstack([self.X_train, self.X_test])
-        y_all = np.hstack([self.y_train, self.y_test])
+        # Usar coeficientes promedio para predicción
+        coeffs = self.summary_stats["avg_coefficients"]
 
-        # Crear rango para las líneas de predicción
-        line_X = np.arange(X_all.min(), X_all.max()).reshape(-1, 1)
+        # Calcular predicción usando regresión lineal promedio
+        input_values = {
+            "DistanceTraveled": distance_traveled,
+            "MeasuredTonnage": measured_tonnage,
+            "SpeedAvg": speed_avg,
+            "RPM": rpm,
+            "SlopePercent": slope_percent,
+            "Acceleration": acceleration,
+            "Distance": distance,
+        }
 
-        # Predicciones
-        line_y_lr = self.lr_model.predict(line_X)
+        # Calcular consumo estimado
+        estimated_consumption = 0
+        for var, value in input_values.items():
+            if var in coeffs:
+                estimated_consumption += coeffs[var] * value
 
-        plt.figure(figsize=(12, 8))
+        # Ajustar por duración
+        consumption_per_hour = estimated_consumption / max(duration_hours, 0.1)
 
-        if self.use_ransac and self.ransac_model is not None:
-            # Identificar inliers y outliers
-            self.ransac_model.fit(
-                X_all, y_all
-            )  # Re-entrenar con todos los datos para visualización
-            inlier_mask = self.ransac_model.inlier_mask_
-            outlier_mask = np.logical_not(inlier_mask)
+        prediction_result = {
+            "estimated_fuel_consumption_liters": abs(estimated_consumption),
+            "consumption_rate_liters_per_hour": abs(consumption_per_hour),
+            "input_parameters": input_values,
+            "duration_hours": duration_hours,
+        }
 
-            line_y_ransac = self.ransac_model.predict(line_X)
+        return prediction_result
 
-            # Plot puntos
-            plt.scatter(
-                X_all[inlier_mask],
-                y_all[inlier_mask],
-                color="yellowgreen",
-                marker=".",
-                label="Inliers",
-                alpha=0.6,
-            )
-            plt.scatter(
-                X_all[outlier_mask],
-                y_all[outlier_mask],
-                color="gold",
-                marker=".",
-                label="Outliers",
-                alpha=0.8,
-            )
+    def plot_cycle_analysis(self):
+        """
+        Genera gráficos de análisis de ciclos
+        """
+        if not self.cycle_metrics:
+            print("No hay datos para graficar")
+            return
 
-            # Plot líneas de regresión
-            plt.plot(
-                line_X, line_y_lr, color="navy", linewidth=2, label="Linear Regression"
-            )
-            plt.plot(
-                line_X,
-                line_y_ransac,
-                color="cornflowerblue",
-                linewidth=2,
-                label="RANSAC Regression",
-            )
-        else:
-            # Solo regresión lineal
-            plt.scatter(X_all, y_all, color="blue", alpha=0.6, label="Data points")
-            plt.plot(
-                line_X, line_y_lr, color="red", linewidth=2, label="Linear Regression"
-            )
+        metrics_df = pl.DataFrame(self.cycle_metrics).T
 
-        plt.xlabel("Delta Fuel (L)")
-        plt.ylabel("Fuel Level (L)")
-        plt.title("Regresión Lineal: Delta Fuel vs Nivel de Combustible")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
+        # Crear subplots
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
 
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches="tight")
-            logger.info(f"Gráfica guardada en: {save_path}")
+        # Gráfico 1: R² Score por ciclo
+        axes[0, 0].bar(range(len(metrics_df)), metrics_df["r2_score"])
+        axes[0, 0].set_title("R² Score por Ciclo")
+        axes[0, 0].set_xlabel("Ciclo ID")
+        axes[0, 0].set_ylabel("R² Score")
 
+        # Gráfico 2: Consumo vs Duración
+        axes[0, 1].scatter(metrics_df["duration_hours"], metrics_df["fuel_consumed"])
+        axes[0, 1].set_title("Consumo vs Duración del Ciclo")
+        axes[0, 1].set_xlabel("Duración (horas)")
+        axes[0, 1].set_ylabel("Combustible Consumido (litros)")
+
+        # Gráfico 3: Tasa de Consumo
+        axes[1, 0].hist(metrics_df["consumption_rate"], bins=10, alpha=0.7)
+        axes[1, 0].set_title("Distribución de Tasa de Consumo")
+        axes[1, 0].set_xlabel("Litros por Hora")
+        axes[1, 0].set_ylabel("Frecuencia")
+
+        # Gráfico 4: RMSE por ciclo
+        axes[1, 1].plot(range(len(metrics_df)), metrics_df["rmse"], "o-")
+        axes[1, 1].set_title("Error RMSE por Ciclo")
+        axes[1, 1].set_xlabel("Ciclo ID")
+        axes[1, 1].set_ylabel("RMSE (litros)")
+
+        plt.tight_layout()
         plt.show()
 
-    def get_model_summary(self) -> dict:
+    def run_complete_analysis(self):
         """
-        Obtiene un resumen del modelo entrenado.
-
-        Returns:
-            Diccionario con información del modelo
+        Ejecuta el análisis completo
         """
-        if not self.is_trained:
-            raise ValueError("El modelo debe ser entrenado primero")
+        print("INICIANDO ANÁLISIS COMPLETO DE CICLOS DE COMBUSTIBLE")
+        print("=" * 60)
 
-        summary = {
-            "data_shape": self.data.shape if self.data is not None else None,
-            "training_samples": len(self.X_train),
-            "test_samples": len(self.X_test),
-            "use_ransac": self.use_ransac,
-            "models_trained": ["linear_regression"],
-        }
+        # 1. Cargar datos
+        if not self.load_data():
+            return False
 
-        if self.use_ransac:
-            summary["models_trained"].append("ransac")
+        # 2. Identificar ciclos
+        if not self.identify_fuel_cycles():
+            print("Error: No se pudieron identificar ciclos válidos")
+            return False
 
-        return summary
+        # 3. Realizar regresiones
+        if not self.perform_cycle_regressions():
+            print("Error: No se pudieron completar las regresiones")
+            return False
 
+        # 4. Analizar resultados
+        metrics_df = self.analyze_results()
 
-# PyTorch Linear Regression Model (alternativa)
-class PyTorchLinearRegressionModel(nn.Module):
-    """
-    Modelo de regresión lineal usando PyTorch como alternativa.
-    """
+        # 5. Generar gráficos
+        self.plot_cycle_analysis()
 
-    def __init__(self, input_size: int = 1):
-        super(PyTorchLinearRegressionModel, self).__init__()
-        self.linear = nn.Linear(input_size, 1)
-
-    def forward(self, x):
-        return self.linear(x)
+        return True
 
 
 # Ejemplo de uso
 if __name__ == "__main__":
-    # Configurar rutas
-    current_file: Path = Path(__file__).resolve().parent.parent.parent
-    data_path: Path = (
-        current_file / "frontend/web/app/correlated_events/all_correlated_events.csv"
-    )
+    # Crear instancia del analizador
+    analyzer = FuelCycleRegressionAnalyzer()
 
-    print(data_path)
-    # Crear y usar el modelo
-    fuel_regressor = FuelLinearRegressionModel(use_ransac=True, random_state=42)
+    # Ejecutar análisis completo
+    success = analyzer.run_complete_analysis()
 
-    try:
-        # Cargar y preprocesar datos
-        data = fuel_regressor.load_data(data_path)
-        fuel_regressor.preprocess_data(test_size=0.2)
-
-        # Entrenar modelo
-        metrics = fuel_regressor.train()
-
-        # Mostrar resultados
-        print("\n=== MÉTRICAS DE EVALUACIÓN ===")
-        for model_name, model_metrics in metrics.items():
-            print(f"\n{model_name.upper()}:")
-            for metric_name, value in model_metrics.items():
-                print(f"  {metric_name}: {value}")
-
-        # Visualizar resultados
-        fuel_regressor.plot_results()
-
-        # Mostrar resumen del modelo
-        summary = fuel_regressor.get_model_summary()
-        print("\n=== RESUMEN DEL MODELO ===")
-        for key, value in summary.items():
-            print(f"{key}: {value}")
+    if success:
+        print("\n" + "=" * 60)
+        print("EJEMPLO DE PREDICCIÓN")
+        print("=" * 60)
 
         # Ejemplo de predicción
-        new_delta_fuel = np.array([[50.0], [100.0], [150.0]])  # Ejemplos de delta_fuel
-        predictions = fuel_regressor.predict(new_delta_fuel, use_ransac=True)
+        prediction = analyzer.predict_fuel_consumption(
+            distance_traveled=10.5,  # km
+            measured_tonnage=150,  # toneladas
+            speed_avg=25,  # km/h
+            rpm=1800,  # revoluciones por minuto
+            slope_percent=5.2,  # porcentaje de pendiente
+            acceleration=0.5,  # m/s²
+            distance=8.3,  # km
+            duration_hours=2.0,  # horas
+        )
 
-        print("\n=== PREDICCIONES DE EJEMPLO ===")
-        for i, (delta, pred) in enumerate(zip(new_delta_fuel.flatten(), predictions)):
-            print(f"Delta Fuel: {delta}L -> Nivel Predicho: {pred:.2f}L")
-
-    except Exception as e:
-        logger.error(f"Error durante la ejecución: {e}")
-        raise
+        if prediction:
+            print(
+                f"Consumo estimado: {prediction['estimated_fuel_consumption_liters']:.2f} litros"
+            )
+            print(
+                f"Tasa de consumo: {prediction['consumption_rate_liters_per_hour']:.2f} litros/hora"
+            )
+    else:
+        print("El análisis no se pudo completar correctamente")

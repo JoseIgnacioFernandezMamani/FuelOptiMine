@@ -55,7 +55,7 @@ class TimeModelTransformer(BaseTransformer):
             )
 
         # 6. Sort results
-        return df.sort("ShiftDate", "TimeStamp")
+        return df.sort("ShiftDate", "TimeStamp").with_row_index("TimeModelId", offset=0)
 
     def normalize_text(self, expr: pl.Expr) -> pl.Expr:
         """Centralized text normalization function"""

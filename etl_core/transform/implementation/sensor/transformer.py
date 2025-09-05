@@ -15,7 +15,6 @@ from polars import Expr
 import math
 
 
-## aplicarle la deteccion de eventos de recarga y finalmente el consumo estimado
 class SensorTransformer(BaseTransformer):
     """Optimized transformer for sensor data using Polars expressions"""
 
@@ -26,6 +25,7 @@ class SensorTransformer(BaseTransformer):
                 "outliers_removed": 0,
                 "invalid_geo_records": 0,
                 "categorical_null_empty_replaced": 0,
+                "refill_events_detected": 0,
             }
         )
 
@@ -50,423 +50,434 @@ class SensorTransformer(BaseTransformer):
         return SensorSchema
 
     def transform(self, df: pl.DataFrame) -> Optional[pl.DataFrame]:
-        """Optimized transformation pipeline using Polars expressions"""
+        """Optimized transformation pipeline using minimal with_columns calls"""
 
-        # 1. Pipeline de transformaciones básicas en una sola operación
-        df = self._apply_basic_transformations(df)
+        # 1. Basic transformations in one operation
+        df = self._apply_all_basic_transformations(df)
 
-        # 2. Métrica: contar categorías vacías reemplazadas
+        # 2. Count categorical null/empty values replaced
         self.metrics["categorical_null_empty_replaced"] = (
             count_null_empty_categorical_values(df, self.categorical_columns)
         )
 
-        # 3. Filtrado y métricas
-        df = self._apply_filters(df)
+        # 3. Apply filters and update metrics
+        df = self._apply_filters_with_metrics(df)
 
-        # 4. Enriquecimiento: cálculos de distancia y pendiente
-        df = self._apply_enrichment_calculations(df)
+        # 4. Sort once for all subsequent operations
+        df = df.sort("ShiftDate", "TimeStamp")
 
-        # 5. Detección de eventos de recarga (último paso)
-        df = self._apply_refill_detection(df)
+        # 5. Apply enrichment calculations (distance, slope, etc.)
+        df = self._apply_complete_enrichment(df)
 
-        # 6. Métricas finales
+        # 6. Apply refill detection and fuel consumption
+        df = self._apply_refill_and_consumption_detection(df)
+
+        # 7. Update final metrics
         self._update_final_metrics(df)
 
-        # 7. Retornar solo las columnas del schema final que existan
-        final_columns: list[str] = list(SensorSchema.model_fields.keys()) + [
+        # 8. Return only final schema columns that exist
+        final_columns = list(SensorSchema.model_fields.keys()) + [
+            "SpeedAvg",
+            "Acceleration",
             "DistanceTraveled",
             "SlopePercent",
-            "before_median",
-            "after_median",
-            "fuel_consumption",
-            "valid_fuel",
-            "delta_fuel",
-            "before_avg",
-            "after_avg",
+            "BeforeMedian",
+            "AfterMedian",
+            "FuelConsumption",
+            "ValidFuel",
+            "DeltaFuel",
+            "BeforeAvg",
+            "AfterAvg",
         ]
-        available_columns: list[str] = [
-            col for col in final_columns if col in df.columns
-        ]
+        available_columns = [col for col in final_columns if col in df.columns]
         return df.select(available_columns)
 
-    def _apply_basic_transformations(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Aplicar todas las transformaciones básicas en una sola operación"""
-        conversion_exprs: list[Expr] = get_coordinate_conversion_exprs()
-        categorical_exprs: list[Expr] = get_categorical_normalization_exprs(
+    def _apply_all_basic_transformations(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Apply all basic transformations in a single with_columns operation"""
+        conversion_exprs = get_coordinate_conversion_exprs()
+        categorical_exprs = get_categorical_normalization_exprs(
             self.categorical_columns
         )
-        outlier_exprs: list[Expr] = self._get_outlier_handling_exprs()
 
-        return df.with_columns(conversion_exprs + categorical_exprs + outlier_exprs)
+        # Combine all basic transformations
+        all_exprs = (
+            conversion_exprs
+            + categorical_exprs
+            + [
+                # Outlier handling
+                pl.when(pl.col("FuelLevelLiters") > 4500)
+                .then(None)
+                .otherwise(pl.col("FuelLevelLiters"))
+                .alias("FuelLevelLiters"),
+                pl.when(pl.col("Speed") > 60)
+                .then(None)
+                .otherwise(pl.col("Speed"))
+                .alias("Speed"),
+            ]
+        )
 
-    def _apply_filters(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Aplicar filtros de outliers y coordenadas inválidas"""
-        before_outliers: int = df.height
+        return df.with_columns(all_exprs)
 
-        # Filtrar outliers y registros geográficos inválidos en una sola operación
-        geo_validation_expr: Expr = get_geo_validation_expr()
-        df_filtered: pl.DataFrame = df.filter(
+    def _apply_filters_with_metrics(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Apply filters and calculate metrics in one operation"""
+        before_records = df.height
+
+        geo_validation_expr = get_geo_validation_expr()
+        df_filtered = df.filter(
             pl.col("FuelLevelLiters").is_not_null()
             & pl.col("Speed").is_not_null()
             & geo_validation_expr
         )
 
-        # Calcular métricas de filtrado
-        after_outliers: int = df_filtered.filter(
+        # Calculate metrics
+        after_outliers = df.filter(
             pl.col("FuelLevelLiters").is_not_null() & pl.col("Speed").is_not_null()
         ).height
 
-        self.metrics["outliers_removed"] = before_outliers - after_outliers
+        self.metrics["outliers_removed"] = before_records - after_outliers
         self.metrics["invalid_geo_records"] = after_outliers - df_filtered.height
 
         return df_filtered
 
-    def _apply_enrichment_calculations(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Aplicar cálculos de enriquecimiento de manera optimizada"""
-        # Ordenar datos por fecha y timestamp
-        df = df.sort("ShiftDate", "TimeStamp")
-
-        # Aplicar transformaciones paso a paso para evitar dependencias circulares
-        df = df.with_columns(self._get_haversine_intermediate_exprs())
-        df = df.with_columns(self._get_delta_exprs())
-        df = df.with_columns(self._calculate_distance_traveled_expr())
-        df = df.with_columns(self._calculate_slope_percent_expr())
-        df = df.with_columns(self._get_final_validation_exprs())
-
-        # Eliminar columnas intermedias (solo si existen)
-        columns_to_drop: list[str] = [
-            col
-            for col in [
-                "LatitudeRad",
-                "LongitudeRad",
-                "LatitudeRadPrev",
-                "LongitudeRadPrev",
-                "delta_lat",
-                "delta_lon",
-            ]
-            if col in df.columns
-        ]
-        if columns_to_drop:
-            df = df.drop(columns_to_drop)
-
-        return df
-
-    def _apply_refill_detection(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Aplicar detección de eventos de recarga y agregar columnas al DataFrame principal"""
+    def _apply_complete_enrichment(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Apply all enrichment calculations with minimal with_columns calls"""
 
         df = df.with_columns(
             [
-                # Mediana móvil antes (ventana de 15 registros hacia atrás)
-                pl.col("FuelLevelLiters")
-                .rolling_median(window_size=15, min_samples=5)
-                .over("Equipment")
-                .alias("before_median"),
-                # Mediana móvil después (ventana de 15 registros hacia adelante)
-                pl.col("FuelLevelLiters")
-                .shift(-10)
-                .rolling_median(window_size=15, min_samples=5)
-                .over("Equipment")
-                .alias("after_median"),
+                # Speed smoothing
+                pl.col("Speed")
+                .rolling_mean(window_size=5, center=True, min_samples=3)
+                .alias("SpeedAvg"),
             ]
         )
 
-        # stage 2
-        # 2. Calcular consumo de combustible con las condiciones especificadas
+        # Step 2: Delta calculations and haversine distance
+        df = df.with_columns(
+            [
+                # Acceleration
+                (
+                    (pl.col("SpeedAvg") - pl.col("SpeedAvg").shift(1))
+                    * 1000
+                    / 3600
+                    / pl.col("RecordDuration")
+                )
+                .fill_null(0)
+                .alias("Acceleration"),
+            ]
+        )
+
+        # Step 3: Distance calculations and route elements
+        df = df.with_columns(
+            [
+                # MRUV distance
+                (
+                    (pl.col("SpeedAvg") * 1000 / 3600 * pl.col("RecordDuration"))
+                    + (0.5 * pl.col("Acceleration") * pl.col("RecordDuration").pow(2))
+                )
+                .fill_null(0)
+                .alias("DistanceTraveled"),
+                (pl.col("Elevation").diff().fill_null(0)).alias("ElevationDelta"),
+            ]
+        )
+
+        df = df.with_columns(
+            [
+                # Slope calculation
+                (
+                    (
+                        pl.col("ElevationDelta")
+                        / pl.col("DistanceTraveled").clip(lower_bound=0.1)
+                    )
+                    * 100
+                )
+                .fill_nan(0)
+                .fill_null(0)
+                .alias("SlopePercent"),
+            ]
+        )
+
+        # Step 7: Final validation and cleanup
+        df = df.with_columns(
+            [
+                # Validated slope
+                pl.when(
+                    (pl.col("RecordDuration").cast(pl.Float64) <= 86400)
+                    & (pl.col("SlopePercent") >= -20)
+                    & (pl.col("SlopePercent") <= 20)
+                )
+                .then(pl.col("SlopePercent"))
+                .otherwise(None)
+                .alias("SlopePercent"),
+                # Validated distance
+                pl.when(
+                    (pl.col("DistanceTraveled") > 0)
+                    & (pl.col("DistanceTraveled") < 1500)
+                    & (pl.col("RecordDuration") <= 86400)
+                )
+                .then(pl.col("DistanceTraveled"))
+                .otherwise(None)
+                .alias("DistanceTraveled"),
+            ]
+        )
+
+        return df
+
+    def _apply_refill_and_consumption_detection(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Apply refill detection and fuel consumption calculation with minimal with_columns"""
+
+        # Detect refill events
+        refill_events = self._detect_refill_events(df)
+        self.metrics["refill_events_detected"] = refill_events.height
+
+        # Join with main dataframe and add fuel consumption logic
+        df = df.join(refill_events, on="TimeStamp", how="left")
+
+        # Apply all fuel-related calculations in minimal steps
+        df = df.with_columns(
+            [
+                # Rolling median for fuel smoothing
+                pl.col("FuelLevelLiters")
+                .rolling_median(window_size=50, min_samples=5)
+                .alias("MedianBefore"),
+            ]
+        )
+
+        df = df.with_columns(
+            [
+                # Auxiliary column for fuel consumption detection
+                pl.when(
+                    (
+                        (pl.col("FuelLevelLiters").shift(1) < pl.col("FuelLevelLiters"))
+                        & (
+                            pl.col("FuelLevelLiters").shift(-1)
+                            < pl.col("FuelLevelLiters")
+                        )
+                    )
+                    | (
+                        (pl.col("FuelLevelLiters").shift(1) > pl.col("FuelLevelLiters"))
+                        & (
+                            pl.col("FuelLevelLiters").shift(-1)
+                            > pl.col("FuelLevelLiters")
+                        )
+                    )
+                )
+                .then(pl.col("FuelLevelLiters"))
+                .otherwise(None)
+                .forward_fill()
+                .alias("AuxFuel")
+            ]
+        )
+
+        # Final fuel consumption calculation
         df = df.with_columns(
             [
                 pl.when(
-                    # Condiciones: before > after AND diferencia < 190
-                    (pl.col("before_median") > pl.col("after_median"))
-                    & ((pl.col("before_median") - pl.col("after_median")) < 190)
+                    (pl.col("AuxFuel").shift(1) > pl.col("AuxFuel").shift(-1))
+                    & (pl.col("AuxFuel").shift(1) > pl.col("AuxFuel"))
+                    & (pl.col("AuxFuel").shift(-1) > pl.col("AuxFuel"))
+                    & (pl.col("MedianBefore") > pl.col("AuxFuel").shift(-1))
+                    & (pl.col("MedianBefore") > pl.col("AuxFuel").shift(1))
                 )
-                .then(pl.col("before_median") - pl.col("after_median"))
+                .then(pl.col("AuxFuel").shift(1) - pl.col("AuxFuel").shift(-1))
                 .otherwise(None)
-                .alias("fuel_consumption")
+                .alias("FuelConsumption")
             ]
         )
 
-        # 1. Detectar eventos de recarga usando la función existente
-        refill_events = self._detect_refill_events(df)
-
-        # 2. Actualizar métrica de eventos detectados
-        self.metrics["refill_events_detected"] = refill_events.height
-
-        # 3. Hacer join con el DataFrame principal para agregar las columnas de recarga
-        # Left join por TimeStamp para que todos los registros se mantengan
-        df = df.join(refill_events, on="TimeStamp", how="left")
+        # Drop auxiliary column
+        if "AuxFuel" in df.columns:
+            df = df.drop("AuxFuel")
 
         return df
 
-    def _get_outlier_handling_exprs(self) -> List[pl.Expr]:
-        """Expresiones para manejar outliers de manera optimizada"""
-        return [
-            pl.when(pl.col("FuelLevelLiters") > 4500)
-            .then(None)
-            .otherwise(pl.col("FuelLevelLiters"))
-            .alias("FuelLevelLiters"),
-            pl.when(pl.col("Speed") > 60)
-            .then(None)
-            .otherwise(pl.col("Speed"))
-            .alias("Speed"),
-        ]
-
-    def _get_haversine_intermediate_exprs(self) -> List[pl.Expr]:
-        """Columnas necesarias en radianes para Haversine - optimizado"""
-        deg_to_rad: Expr = pl.lit(math.pi / 180)
-        return [
-            (pl.col("Latitude") * deg_to_rad).alias("LatitudeRad"),
-            (pl.col("Longitude") * deg_to_rad).alias("LongitudeRad"),
-            (pl.col("Latitude").shift(1).over("Equipment") * deg_to_rad).alias(
-                "LatitudeRadPrev"
-            ),
-            (pl.col("Longitude").shift(1).over("Equipment") * deg_to_rad).alias(
-                "LongitudeRadPrev"
-            ),
-        ]
-
-    def _get_delta_exprs(self) -> List[pl.Expr]:
-        """Columnas delta para Haversine"""
-        return [
-            (pl.col("LatitudeRad") - pl.col("LatitudeRadPrev")).alias("delta_lat"),
-            (pl.col("LongitudeRad") - pl.col("LongitudeRadPrev")).alias("delta_lon"),
-        ]
-
-    def _calculate_distance_traveled_expr(self) -> pl.Expr:
-        """Cálculo optimizado de distancia entre puntos con fórmula Haversine"""
-        R: Expr = pl.lit(6371000.0)  # Radio terrestre en metros como literal
-
-        # Fórmula Haversine optimizada
-        a: Expr = (
-            (pl.col("delta_lat") / 2).sin().pow(2)
-            + pl.col("LatitudeRadPrev").cos()
-            * pl.col("LatitudeRad").cos()
-            * (pl.col("delta_lon") / 2).sin().pow(2)
-        ).clip(lower_bound=0.0, upper_bound=1.0)
-
-        c: Expr = 2 * pl.arctan2(a.sqrt(), (1 - a).sqrt())
-
-        return (R * c).fill_null(0).alias("DistanceTraveled")
-
-    def _calculate_slope_percent_expr(self) -> pl.Expr:
-        """Cálculo optimizado de pendiente en %"""
-        elevation_diff: Expr = pl.col("Elevation").diff(1).over("Equipment")
-        slope: Expr = (elevation_diff / pl.col("DistanceTraveled")) * 100
-
-        return slope.fill_nan(0).fill_null(0).alias("SlopePercent")
-
-    def _get_final_validation_exprs(self) -> List[pl.Expr]:
-        """Expresiones de validación final para distancia y pendiente"""
-        return [
-            pl.when(
-                (pl.col("RecordDuration").cast(pl.Float64) <= 60)
-                & (pl.col("SlopePercent") >= -20)
-                & (pl.col("SlopePercent") <= 20)
-            )
-            .then(pl.col("SlopePercent"))
-            .otherwise(None)
-            .alias("SlopePercent"),
-            pl.when(
-                (pl.col("DistanceTraveled") > 0)
-                & (pl.col("RecordDuration") <= 60)
-                & (pl.col("SlopePercent").is_not_null())
-            )
-            .then(pl.col("DistanceTraveled"))
-            .otherwise(None)
-            .alias("DistanceTraveled"),
-        ]
-
     def _update_final_metrics(self, df: pl.DataFrame) -> None:
-        """Actualizar métricas finales"""
+        """Update final metrics"""
         self.metrics["after_transform_records"] = df.height
         if self.metrics["initial_records"] > 0:
             self.metrics["final_data_percentage"] = round(
                 (df.height / self.metrics["initial_records"]) * 100, 2
             )
 
-    # This space is reserved for adding additional methods in the future.
-
     def _detect_refill_events(
         self, sensor_df: pl.DataFrame, min_refill_threshold=190
     ) -> pl.DataFrame:
-        """
-        Detects fuel refill events from raw fuel level sensor data for a specific truck.
+        """Detect fuel refill events with optimized column operations"""
 
-        The function:
-        - removes anomalies (spikes, valleys, plateaus, out-of-range values),
-        - computes before/after rolling medians,
-        - detects refill candidates,
-        - groups nearby records into single refill events,
-        - and returns significant refill events with the original/group TimeStamp kept.
-        """
+        CAPACITY = TRUCK_SPECS[self.truck_id]["capacity"] + 100
 
-        CAPACITY: float | int = (
-            TRUCK_SPECS[self.truck_id]["capacity"] + 100
-        )  # keep your original +100 tolerance
-
-        # --- 1) Detect and mask anomalies (keep data sorted by TimeStamp) ---
-        refill_df: pl.DataFrame = (
-            sensor_df.with_columns(
-                # columns used only for removal of spikes and valleys
-                pl.col("FuelLevelLiters").diff(1).alias("diff_prev"),
-                pl.col("FuelLevelLiters").shift(-1).diff(1).alias("diff_next"),
-                pl.col("FuelLevelLiters").shift(-2).diff(1).alias("diff_next_next"),
-                # columns used only for removal of valleys and plateaus
+        # Step 1: All anomaly detection calculations in one operation
+        refill_df = sensor_df.with_columns(
+            [
+                # Difference calculations
+                pl.col("FuelLevelLiters").diff(1).alias("DiffPrev"),
+                pl.col("FuelLevelLiters").shift(-1).diff(1).alias("DiffNext"),
+                pl.col("FuelLevelLiters").shift(-2).diff(1).alias("DiffNextNext"),
+                # Rolling medians
                 pl.col("FuelLevelLiters")
                 .rolling_median(window_size=100, min_samples=10)
-                .alias("median_before"),
+                .alias("MedianBefore"),
                 pl.col("FuelLevelLiters")
                 .shift(-100)
                 .rolling_median(window_size=100, min_samples=10)
-                .alias("median_after"),
-            ).with_columns(
+                .alias("MedianAfter"),
+            ]
+        )
+
+        # Step 2: Anomaly detection and valid fuel calculation
+        refill_df = refill_df.with_columns(
+            [
+                # Complex anomaly detection in one expression
                 (
-                    # Out of range values
                     (pl.col("FuelLevelLiters") >= CAPACITY)
                     | (pl.col("FuelLevelLiters") <= 0)
-                    # Sudden spike up then down
                     | (
-                        (pl.col("diff_prev") > min_refill_threshold)
-                        & (pl.col("diff_next") < -min_refill_threshold)
+                        (pl.col("DiffPrev") > min_refill_threshold)
+                        & (pl.col("DiffNext") < -min_refill_threshold)
                     )
-                    # Sudden spike down then up
                     | (
-                        (pl.col("diff_prev") < -min_refill_threshold)
-                        & (pl.col("diff_next") > min_refill_threshold)
+                        (pl.col("DiffPrev") < -min_refill_threshold)
+                        & (pl.col("DiffNext") > min_refill_threshold)
                     )
-                    # Complex spike pattern (up-down-up)
                     | (
-                        (pl.col("diff_prev") > min_refill_threshold)
-                        & (pl.col("diff_next") < -min_refill_threshold)
-                        & (pl.col("diff_next_next") > min_refill_threshold)
+                        (pl.col("DiffPrev") > min_refill_threshold)
+                        & (pl.col("DiffNext") < -min_refill_threshold)
+                        & (pl.col("DiffNextNext") > min_refill_threshold)
                     )
-                    # Complex valley pattern (down-up-down)
                     | (
-                        (pl.col("diff_prev") < -min_refill_threshold)
-                        & (pl.col("diff_next") > min_refill_threshold)
-                        & (pl.col("diff_next_next") < -min_refill_threshold)
+                        (pl.col("DiffPrev") < -min_refill_threshold)
+                        & (pl.col("DiffNext") > min_refill_threshold)
+                        & (pl.col("DiffNextNext") < -min_refill_threshold)
                     )
-                    # Plateau anomaly: small rise at start, larger drop at end
                     | (
                         (
                             pl.col("FuelLevelLiters")
-                            > pl.col("median_before") + (min_refill_threshold // 2)
+                            > pl.col("MedianBefore") + (min_refill_threshold // 2)
                         )
                         & (
                             pl.col("FuelLevelLiters")
-                            > pl.col("median_after") + min_refill_threshold
+                            > pl.col("MedianAfter") + min_refill_threshold
                         )
                     )
-                    # Valley anomaly: sharp drop at start, smaller rise at end
                     | (
                         (
                             pl.col("FuelLevelLiters") + min_refill_threshold
-                            < pl.col("median_before")
+                            < pl.col("MedianBefore")
                         )
                         & (
                             pl.col("FuelLevelLiters") + (min_refill_threshold // 2)
-                            < pl.col("median_after")
+                            < pl.col("MedianAfter")
                         )
                     )
-                ).alias("is_anomaly")
-            )
-            # Replace anomalies with last valid reading
-            .with_columns(
-                pl.when(pl.col("is_anomaly"))
+                ).alias("IsAnomaly"),
+            ]
+        )
+
+        # Step 3: Valid fuel and refill detection calculations
+        refill_df = refill_df.with_columns(
+            [
+                # Valid fuel (replace anomalies with forward fill)
+                pl.when(pl.col("IsAnomaly"))
                 .then(None)
                 .otherwise(pl.col("FuelLevelLiters"))
                 .forward_fill()
-                .alias("valid_fuel")
-            )
+                .alias("ValidFuel"),
+            ]
         )
 
-        # --- 2) Rolling medians / deltas to detect refill candidates ---
-        unfiltered_df: pl.DataFrame = refill_df.with_columns(
-            pl.col("valid_fuel")
-            .rolling_median(window_size=15, min_samples=5)
-            .alias("before_avg"),
-            pl.col("valid_fuel")
-            .shift(-10)
-            .rolling_median(window_size=15, min_samples=5)
-            .alias("after_avg"),
-            pl.col("valid_fuel").diff().fill_null(0).alias("delta_fuel"),
-            pl.col("valid_fuel")
-            .shift(-100)
-            .rolling_median(window_size=50, min_samples=20)
-            .alias("improved_after_avg_100"),
-            pl.col("valid_fuel")
-            .shift(-50)
-            .rolling_median(window_size=30, min_samples=15)
-            .alias("improved_after_avg_50"),
+        # Step 4: All refill detection calculations
+        unfiltered_df = refill_df.with_columns(
+            [
+                # Before and after averages
+                pl.col("ValidFuel")
+                .rolling_median(window_size=15, min_samples=5)
+                .alias("BeforeAvg"),
+                pl.col("ValidFuel")
+                .shift(-10)
+                .rolling_median(window_size=15, min_samples=5)
+                .alias("AfterAvg"),
+                # Delta fuel
+                pl.col("ValidFuel").diff().fill_null(0).alias("DeltaFuel"),
+                # Improved after averages
+                pl.col("ValidFuel")
+                .shift(-100)
+                .rolling_median(window_size=50, min_samples=20)
+                .alias("ImprovedAfterAvg100"),
+                pl.col("ValidFuel")
+                .shift(-50)
+                .rolling_median(window_size=30, min_samples=15)
+                .alias("ImprovedAfterAvg50"),
+            ]
         )
 
-        # --- 3) First-pass: fast refill detection ---
+        # Filter for refill candidates
         refill_df = unfiltered_df.filter(
-            (pl.col("delta_fuel") > min_refill_threshold - 25)
-            & (pl.col("after_avg") > (pl.col("before_avg") + min_refill_threshold))
+            (pl.col("DeltaFuel") > min_refill_threshold - 25)
+            & (pl.col("AfterAvg") > (pl.col("BeforeAvg") + min_refill_threshold))
         ).sort("TimeStamp")
 
-        # get truth after average
+        # Final calculations and grouping
         refill_df = refill_df.with_columns(
-            pl.when(
-                (pl.col("improved_after_avg_50").is_not_null())
-                & (pl.col("improved_after_avg_50") <= CAPACITY)
-                & (pl.col("valid_fuel") < pl.col("improved_after_avg_50"))
-            )
-            .then(pl.col("improved_after_avg_50"))
-            .when(
-                (pl.col("improved_after_avg_100").is_not_null())
-                & (pl.col("improved_after_avg_100") <= CAPACITY)
-                & (pl.col("valid_fuel") < pl.col("improved_after_avg_100"))
-            )
-            .then(pl.col("improved_after_avg_100"))
-            .otherwise(pl.col("after_avg"))
-            .alias("after_avg")
-        ).with_columns(
-            (pl.col("after_avg") - pl.col("before_avg")).abs().alias("delta_fuel")
+            [
+                # Improved after average selection
+                pl.when(
+                    (pl.col("ImprovedAfterAvg50").is_not_null())
+                    & (pl.col("ImprovedAfterAvg50") <= CAPACITY)
+                    & (pl.col("ValidFuel") < pl.col("ImprovedAfterAvg50"))
+                )
+                .then(pl.col("ImprovedAfterAvg50"))
+                .when(
+                    (pl.col("ImprovedAfterAvg100").is_not_null())
+                    & (pl.col("ImprovedAfterAvg100") <= CAPACITY)
+                    & (pl.col("ValidFuel") < pl.col("ImprovedAfterAvg100"))
+                )
+                .then(pl.col("ImprovedAfterAvg100"))
+                .otherwise(pl.col("AfterAvg"))
+                .alias("AfterAvg"),
+            ]
         )
 
-        # Grouping of continuous events
-        refill_df = (
-            refill_df.with_columns(
+        # Recalculate delta and group events
+        refill_df = refill_df.with_columns(
+            [
+                (pl.col("AfterAvg") - pl.col("BeforeAvg")).abs().alias("DeltaFuel"),
                 pl.col("TimeStamp")
                 .diff()
                 .dt.total_seconds()
                 .fill_null(60)
-                .alias("time_diff")
-            )
-            .with_columns(
-                pl.when(pl.col("time_diff") > 10800)
+                .alias("TimeDiff"),
+            ]
+        )
+
+        refill_df = refill_df.with_columns(
+            [
+                pl.when(pl.col("TimeDiff") > 10800)
                 .then(1)
                 .otherwise(0)
                 .cum_sum()
-                .alias("group_id")
-            )
-            .group_by("group_id")
-            .agg(
-                (pl.col("after_avg").last() - pl.col("before_avg").first()).alias(
-                    "delta_fuel"
-                ),
-                pl.col("TimeStamp").max().alias("TimeStamp"),
-                pl.when(pl.len() > 1)
-                .then(pl.col("valid_fuel").last())
-                .otherwise(pl.col("valid_fuel").first())
-                .alias("valid_fuel"),
-                pl.col("before_avg").first().alias("before_avg"),
-                pl.col("after_avg").last().alias("after_avg"),
-            )
+                .alias("GroupId")
+            ]
         )
 
-        # result final
-        return (
-            refill_df.filter(pl.col("delta_fuel") > 500)
-            .select(
+        # Group and aggregate
+        result_df = (
+            refill_df.group_by("GroupId")
+            .agg(
                 [
-                    "TimeStamp",
-                    "valid_fuel",
-                    "delta_fuel",
-                    "before_avg",
-                    "after_avg",
+                    (pl.col("AfterAvg").last() - pl.col("BeforeAvg").first()).alias(
+                        "DeltaFuel"
+                    ),
+                    pl.col("TimeStamp").max().alias("TimeStamp"),
+                    pl.when(pl.len() > 1)
+                    .then(pl.col("ValidFuel").last())
+                    .otherwise(pl.col("ValidFuel").first())
+                    .alias("ValidFuel"),
+                    pl.col("BeforeAvg").first().alias("BeforeAvg"),
+                    pl.col("AfterAvg").last().alias("AfterAvg"),
                 ]
             )
+            .filter(pl.col("DeltaFuel") > 500)
+            .select(["TimeStamp", "ValidFuel", "DeltaFuel", "BeforeAvg", "AfterAvg"])
             .sort("TimeStamp")
         )
+
+        return result_df
