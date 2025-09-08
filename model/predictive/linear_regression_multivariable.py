@@ -963,7 +963,6 @@ def main():
     # Definir variables predictoras
     predictor_variables = [
         "AverageSpeed",
-        "AvgRPM",
         "AvgSlopePercent",
         "AvgAcceleration",
         "TotalMeasuredTonnage",
