@@ -1,91 +1,131 @@
 import polars as pl
 import pandas as pd
 import numpy as np
-import category_encoders as ce
+import json
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LinearRegression
+from sklearn import linear_model
+from sklearn.ensemble import IsolationForest
+from typing import Dict, List, Any
 from sklearn.metrics import (
     r2_score,
     mean_absolute_error,
     mean_squared_error,
-    mean_absolute_percentage_error,
     median_absolute_error,
     explained_variance_score,
+    mean_absolute_percentage_error,
 )
-from typing import Dict, List, Tuple, Any
-from sklearn import linear_model
+from sklearn.model_selection import train_test_split
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+import logging
+import datetime
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("lrm.log", mode="a"),  # guarda en archivo
+        logging.StreamHandler(),  # también imprime en consola
+    ],
+)
+logger = logging.getLogger(__name__)
 
 
-class LinearRegressionMultivariable:
+class LinearRegressionModel:
     """
-    Clase para manejo de regresión lineal multivariable con preparación completa de datos
-    siguiendo principios SOLID - Single Responsibility Principle
-    Entrena automáticamente dos modelos: uno para Stage 4 y otro para Stage 8
+    Clase simplificada para regresión lineal con dos modelos: Stage 4 y Stage 8
     """
 
-    def __init__(self, predictor_vars: List[str]):
-        """
-        Initialize the class
-        """
-        self.cycles_data = pl.DataFrame()
-        self.predictor_vars = predictor_vars
+    def __init__(self):
+        self.cycles_data: pl.DataFrame = pl.DataFrame()
+        self.predictor_vars: list[str] = [
+            "Distance",
+            "CycleDurationSeconds",  # no incluyo tonage porque no aporta nada realmente a la prediccion.
+        ]
 
-        # Escaladores y encoders para cada stage
-        self.feature_scaler_stage_4 = StandardScaler()
-        self.feature_scaler_stage_8 = StandardScaler()
-        self.destination_encoder_stage_4 = ce.BinaryEncoder(cols=["Destination"])
-        self.destination_encoder_stage_8 = ce.BinaryEncoder(cols=["Destination"])
+        # Escaladores para cada stage
+        self.scaler_stage_4: StandardScaler = StandardScaler()
+        self.scaler_stage_8: StandardScaler = StandardScaler()
 
-        # Modelos para cada stage
-        self.mlr_model_stage_4 = linear_model.LinearRegression()
-        self.mlr_model_stage_8 = linear_model.LinearRegression()
-        self.ransac_model_stage_4 = linear_model.RANSACRegressor()
-        self.ransac_model_stage_8 = linear_model.RANSACRegressor()
+        # Modelos
+        self.model_stage_4: linear_model.RANSACRegressor = (
+            linear_model.RANSACRegressor()
+        )
+        self.model_stage_8: linear_model.RANSACRegressor = (
+            linear_model.RANSACRegressor()
+        )
 
-        # Resultados de ambos modelos
-        self.model_results_stage_4 = {}
-        self.model_results_stage_8 = {}
+        # modelo de isolation forest para detección de outliers
+        self.iso_forest_stage_4: IsolationForest = IsolationForest(
+            contamination=0.05, random_state=42
+        )
+        self.iso_forest_stage_8: IsolationForest = IsolationForest(
+            contamination=0.05, random_state=42
+        )
 
-        # Datos preparados para cada stage
-        self.prepared_data_stage_4 = {}
-        self.prepared_data_stage_8 = {}
-
-        self.df = pl.DataFrame()  # raw data
+        # Resultados
+        self.results_stage_4: dict = {}
+        self.results_stage_8: dict = {}
+        self.df: pl.DataFrame = pl.DataFrame()
 
     def load_data(self):
         """
-        Cargar datos desde archivo CSV
-
-        Returns:
-            pl.DataFrame: DataFrame con los datos cargados
+        Load data from CSV file (hardcoding for now).
         """
-        print("Cargando datos desde unified_data_T-210.csv...")
+        logger.info("Cargando datos desde ...")
         df = pl.read_csv("unified_data_T-210.csv", try_parse_dates=True)
         self.df = df.sort("SortTimestamp")
-        return self.df
 
     def transform_cycles_data(self):
         """
-        Procesar datos para identificar ciclos y calcular métricas de consumo de combustible
+        Process data to identify cycles and calculate fuel consumption metrics
+
+        This method performs comprehensive data transformation to identify truck operational
+        cycles and calculate fuel consumption for each cycle. It processes sensor data to
+        create meaningful cycle-based aggregations for model training.
+
+        The transformation includes:
+            - Cycle identification based on stage sequences
+            - Fuel level smoothing using rolling median
+            - Geographic data unification
+            - Cycle grouping and aggregation
+            - Fuel consumption calculation
+            - Data quality filtering
+
+        Results are stored in self.cycles_data as a Polars DataFrame.
         """
-        # Identify records with cycle and calculate rolling medians
         df = self.df.with_columns(
             [
-                # identify cycles
+                # identificar ciclos
                 pl.when((pl.col("StageSequence") == 4) | (pl.col("StageSequence") == 8))
                 .then(True)
                 .otherwise(False)
                 .alias("cycle_end"),
-                # Rolling medians to obtain estimated fuel consumption
+                # rolling median del nivel de combustible
                 pl.col("FuelLevelLiters")
                 .rolling_median(window_size=10, min_samples=3, center=True)
                 .alias("MedianFuelLevelLiters"),
-                pl.coalesce(["LoadingZone", "Destination"]).alias("Destination"),
+                # unificar destinos
+                pl.coalesce([pl.col("LoadingZone"), pl.col("Destination")]).alias(
+                    "Destination"
+                ),
+                # datos geográficos
+                pl.when(pl.col("Latitude") != 0)
+                .then(pl.col("Latitude"))
+                .otherwise(pl.col("Latitude_cycle"))
+                .alias("Latitude"),
+                pl.when(pl.col("Longitude") != 0)
+                .then(pl.col("Longitude"))
+                .otherwise(pl.col("Longitude_cycle"))
+                .alias("Longitude"),
+                pl.when(pl.col("Elevation") != 0)
+                .then(pl.col("Elevation"))
+                .otherwise(pl.col("Elevation_cycle"))
+                .alias("Elevation"),
             ]
         )
 
-        # Create cycle groups - each group represents a stage (empty or full)
+        # crear grupos de ciclos
         df = df.with_columns(
             [
                 pl.col("cycle_end")
@@ -95,438 +135,240 @@ class LinearRegressionMultivariable:
             ]
         )
 
-        # group for stage
         result = (
             df.group_by("cycle_group")
             .agg(
                 [
+                    # metadatos
+                    pl.len().alias(
+                        "RecordsInCycle"
+                    ),  # numero de registros de sensor, metadato
                     pl.col("TimeStamp").first().alias("TimeStampIni"),
                     pl.col("TimeStamp").last().alias("TimeStampFin"),
                     pl.col("ShiftDate").last().alias("ShiftDate"),
+                    pl.col("Shift").last().alias("Shift"),
                     pl.col("Equipment").last().alias("Equipment"),
-                    pl.col("TruckFleet").last().alias("TruckFleet"),
-                    pl.col("MedianFuelLevelLiters").first().alias("StartCycle"),
-                    pl.col("MedianFuelLevelLiters").last().alias("EndCycle"),
-                    pl.col("SpeedAvg").mean().alias("AverageSpeed"),
-                    pl.col("RPM").mean().alias("AvgRPM"),
+                    pl.col("TruckFleet")
+                    .last()
+                    .alias("TruckFleet"),  # fin de los metadatos
+                    # variables para calculo
+                    pl.col("MedianFuelLevelLiters")
+                    .first()
+                    .alias("StartCycle"),  # para calculo inicial
+                    pl.col("MedianFuelLevelLiters")
+                    .last()
+                    .alias("EndCycle"),  # para calculo final
+                    # variables numericas para modelo
+                    pl.col("SpeedAvg").mean().alias("AvgSpeed"),
                     pl.col("SlopePercent").mean().alias("AvgSlopePercent"),
                     pl.col("Acceleration").mean().alias("AvgAcceleration"),
-                    pl.col("MeasuredTonnage").sum().alias("TotalMeasuredTonnage"),
-                    pl.col("Distance").sum().alias("Distance"),
+                    pl.col("TimeEfficiencyPercentage")
+                    .mean()
+                    .alias("AvgTimeEfficiencyPercentage"),
+                    pl.col("Latitude").last().alias("Latitude"),
+                    pl.col("Longitude").last().alias("Longitude"),
+                    pl.col("Elevation").last().alias("Elevation"),
+                    # variables categoricas
                     pl.col("StageSequence").last().alias("StageSequence"),
                     pl.col("Destination").last().alias("Destination"),
-                    pl.len().alias("RecordsInCycle"),
+                    pl.col("DestinationType").last().alias("DestinationType"),
+                    pl.col("Material").last().alias("Material"),
+                    pl.col("Shovel").last().alias("Shovel"),
+                    # datos reales de los ciclos
+                    pl.col("MeasuredTonnage").sum().alias("TotalMeasuredTonnage"),
+                    pl.col("Distance").sum().alias("Distance"),
                 ]
             )
             .sort("TimeStampIni")
         )
 
-        # filter invalid data for Destination
-        result = result.filter(
-            (pl.col("Destination").str.strip_chars().str.len_chars() > 2)
-        )
-
-        # filter invalid data for FuelConsumed and CycleDurationSeconds
+        # calcular combustible consumido y duración del ciclo
         result = result.with_columns(
-            pl.when((pl.col("StartCycle") - pl.col("EndCycle")).abs() <= 500)
-            .then((pl.col("StartCycle") - pl.col("EndCycle")).abs())
-            .otherwise(10)
-            .alias("FuelConsumed"),
-            (pl.col("TimeStampFin") - pl.col("TimeStampIni"))
-            .dt.total_seconds()
-            .abs()
-            .alias("CycleDurationSeconds"),
+            [
+                pl.when(
+                    ((pl.col("StartCycle") - pl.col("EndCycle")).abs() <= 500)
+                    & ((pl.col("StartCycle") - pl.col("EndCycle")).abs() >= 5)
+                )
+                .then((pl.col("StartCycle") - pl.col("EndCycle")).abs())
+                .when((pl.col("StartCycle") - pl.col("EndCycle")) < 5)
+                .then(5)
+                .alias("FuelConsumed"),
+                (pl.col("TimeStampFin") - pl.col("TimeStampIni"))
+                .dt.total_seconds()
+                .abs()
+                .alias("CycleDurationSeconds"),
+            ]
         )
 
-        # columns that need to be cleaned
-        cols_to_clean = self.predictor_vars + ["FuelConsumed"]
-
-        # Clean each column from null, NaN or infinite values
-        for col in cols_to_clean:
-            result = result.with_columns(
-                pl.when(
-                    pl.col(col).is_infinite()
-                    | pl.col(col).is_nan()
-                    | pl.col(col).is_null()
-                )
-                .then(0)
-                .otherwise(pl.col(col))
-                .alias(col)
-            )
+        # filtros básicos
+        result = result.filter(
+            (pl.col("Destination").str.strip_chars().str.len_bytes() > 2)
+            & (pl.col("Distance") > 0)
+            & (pl.col("TotalMeasuredTonnage") >= 0)
+            & (pl.col("CycleDurationSeconds") > 120)
+            & (pl.col("CycleDurationSeconds") < 21600)
+            & (pl.col("FuelConsumed") >= 0.1)
+            & (pl.col("FuelConsumed") <= 210)
+            & (pl.col("StageSequence").is_not_null())
+        )
 
         self.cycles_data = result
-
-    def get_datasets_by_stage(self) -> Dict[str, pl.DataFrame]:
-        """
-        Obtener datasets separados por tipo de etapa (Stage 4 y Stage 8)
-        """
-        stage_4_data = self.cycles_data.filter(pl.col("StageSequence") == 4)
-        stage_8_data = self.cycles_data.filter(pl.col("StageSequence") == 8)
-
-        return {"stage_4": stage_4_data, "stage_8": stage_8_data}
 
     def prepare_data_for_stage(
         self,
         data: pl.DataFrame,
-        stage: str,
+        scaler: StandardScaler,
+        iso_forest: IsolationForest,
         test_size: float = 0.2,
         random_state: int = 42,
     ) -> Dict[str, Any]:
         """
-        Preparar datos para un stage específico
+        This method prepares cycle data by extracting features,
+        splitting into train/test sets, and applying standardization scaling.
+
+        Args:
+            data (pl.DataFrame): Cycle data filtered for specific stage
+            scaler (StandardScaler): Sklearn scaler for feature normalization
+            test_size (float, optional): Proportion for test split. Defaults to 0.2.
+            random_state (int, optional): Random seed for reproducible splits. Defaults to 42.
+
+        Returns:
+            Dict[str, Any]: Dictionary containing:
+                - X_train: Scaled training features
+                - X_test: Scaled test features
+                - y_train: Training target values (fuel consumption)
+                - y_test: Test target values (fuel consumption
         """
-        # Extraer variables predictoras numéricas
-        X_numeric = data.select(self.predictor_vars).to_pandas()
+        logger.info(f"Preparando datos para stage con {len(data)} muestras iniciales")
 
-        # Extraer variable categórica
-        X_destination = data.select("Destination").to_pandas()
-
-        # Extraer variable objetivo
+        # select predictor variables and target
+        X = data.select(self.predictor_vars).to_pandas()
         y = data.select("FuelConsumed").to_numpy().flatten()
 
-        # División entrenamiento/prueba
-        X_numeric_train, X_numeric_test, y_train, y_test = train_test_split(
-            X_numeric, y, test_size=test_size, random_state=random_state, shuffle=True
+        logger.info(f"Variables predictoras: {self.predictor_vars}")
+
+        # delete outliers using IsolationForest
+        logger.info("Detectando outliers con Isolation Forest...")
+        outlier_predictions = iso_forest.fit_predict(X)
+
+        # Create boolean mask for inliers (1 = inlier, -1 = outlier)
+        inlier_mask = outlier_predictions == 1
+        n_outliers = np.sum(~inlier_mask)
+        outlier_percentage = (n_outliers / len(X)) * 100
+
+        logger.info(f"Outliers detectados: {n_outliers} ({outlier_percentage:.2f}%)")
+
+        # filter to keep only inliers
+        X_clean = X[inlier_mask]
+        y_clean = y[inlier_mask]
+
+        logger.info(
+            f"Datos después de remover outliers - X: {X_clean.shape}, y: {y_clean.shape}"
         )
 
-        X_dest_train, X_dest_test = train_test_split(
-            X_destination, test_size=test_size, random_state=random_state, shuffle=True
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_clean,
+            y_clean,
+            test_size=test_size,
+            random_state=random_state,
+            shuffle=True,
         )
 
-        # Seleccionar encoder y scaler según el stage
-        if stage == "stage_4":
-            destination_encoder = self.destination_encoder_stage_4
-            feature_scaler = self.feature_scaler_stage_4
-        else:
-            destination_encoder = self.destination_encoder_stage_8
-            feature_scaler = self.feature_scaler_stage_8
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
 
-        # Codificación binaria para variable categórica 'Destination'
-        X_dest_train_encoded = destination_encoder.fit_transform(
-            X_dest_train
-        ).to_numpy()
-        X_dest_test_encoded = destination_encoder.transform(X_dest_test).to_numpy()
+        # Prepare outlier information for logging
+        outlier_info = {
+            "n_outliers_detected": n_outliers,
+            "outlier_percentage": outlier_percentage,
+            "original_samples": len(X),
+            "clean_samples": len(X_clean),
+            "contamination_used": iso_forest.contamination,
+        }
 
-        # Estandarización de variables numéricas
-        X_numeric_train_scaled = feature_scaler.fit_transform(X_numeric_train)
-        X_numeric_test_scaled = feature_scaler.transform(X_numeric_test)
-
-        # Combinar características numéricas escaladas y categóricas codificadas
-        X_train_scaled = np.hstack([X_numeric_train_scaled, X_dest_train_encoded])
-        X_test_scaled = np.hstack(
-            [X_numeric_test_scaled, X_dest_test_encoded]
-        )  # ignorar warning
+        logger.info(
+            f"División final - Train: {len(X_train_scaled)}, Test: {len(X_test_scaled)}"
+        )
 
         return {
             "X_train": X_train_scaled,
             "X_test": X_test_scaled,
             "y_train": y_train,
             "y_test": y_test,
-            "train_samples": len(y_train),
-            "test_samples": len(y_test),
-            "total_features": X_train_scaled.shape[1],
+            "outlier_info": outlier_info,
         }
 
-    def calculate_metrics(
-        self, y_true, y_pred, model_type="linear"
-    ) -> Dict[str, float]:
+    def calculate_metrics(self, y_true, y_pred) -> Dict[str, float]:
         """
-        Calcular todas las métricas de evaluación de forma robusta para diferentes tipos de modelos
+        Calculate comprehensive regression performance metrics
+
+        Args:
+            y_true: True target values
+            y_pred: Predicted values
+
+        Returns:
+            Dict[str, float]: Dictionary containing performance metrics:
+                - r2: R-squared score
+                - mae: Mean Absolute Error
+                - rmse: Root Mean Square Error
+                - medae: Median Absolute Error
+                - explained_variance: Explained Variance Score
+                - mape: Mean Absolute Percentage Error
+                - rmsle: Root Mean Square Log Error
         """
         metrics = {}
-
-        # Convertir a arrays numpy y asegurar que son float
         y_true = np.asarray(y_true, dtype=np.float64)
         y_pred = np.asarray(y_pred, dtype=np.float64)
-
-        # Filtrar valores no finitos
         finite_mask = np.isfinite(y_true) & np.isfinite(y_pred)
-        y_true_filtered = y_true[finite_mask]
-        y_pred_filtered = y_pred[finite_mask]
+        y_true, y_pred = y_true[finite_mask], y_pred[finite_mask]
 
-        # Si no hay suficientes datos después del filtrado, retornar NaN para todas las métricas
-        if len(y_true_filtered) < 2 or len(y_pred_filtered) < 2:
-            for metric_name in [
-                "r2",
-                "mae",
-                "rmse",
-                "medae",
-                "explained_variance",
-                "mape",
-                "rmsle",
-            ]:
-                metrics[metric_name] = np.nan
-            return metrics
-
-        # Métricas estándar con manejo robusto de errores
-        try:
-            metrics["r2"] = r2_score(y_true_filtered, y_pred_filtered)
-        except Exception as e:
-            metrics["r2"] = np.nan
-
-        try:
-            metrics["mae"] = mean_absolute_error(y_true_filtered, y_pred_filtered)
-        except Exception as e:
-            metrics["mae"] = np.nan
-
-        try:
-            mse = mean_squared_error(y_true_filtered, y_pred_filtered)
-            metrics["rmse"] = np.sqrt(mse)
-        except Exception as e:
-            metrics["rmse"] = np.nan
-
-        try:
-            metrics["medae"] = median_absolute_error(y_true_filtered, y_pred_filtered)
-        except Exception as e:
-            metrics["medae"] = np.nan
-
-        try:
-            metrics["explained_variance"] = explained_variance_score(
-                y_true_filtered, y_pred_filtered
-            )
-        except Exception as e:
-            metrics["explained_variance"] = np.nan
-
-        # MAPE con manejo especial para RANSAC (más tolerante con outliers)
-        try:
-            if model_type == "ransac":
-                # Para RANSAC, usar una versión más robusta del MAPE
-                # que sea menos sensible a valores extremos
-                epsilon = 1e-10  # pequeño valor para evitar división por cero
-                ape = np.abs(
-                    (y_true_filtered - y_pred_filtered) / (y_true_filtered + epsilon)
-                )
-                # Recortar los valores extremos (1% superior e inferior)
-                lower_bound = np.percentile(ape, 1)
-                upper_bound = np.percentile(ape, 99)
-                ape_trimmed = ape[(ape >= lower_bound) & (ape <= upper_bound)]
-                metrics["mape"] = (
-                    np.mean(ape_trimmed) if len(ape_trimmed) > 0 else np.nan
-                )
-            else:
-                # Para modelos lineales estándar, usar MAPE normal
-                metrics["mape"] = mean_absolute_percentage_error(
-                    y_true_filtered, y_pred_filtered
-                )
-        except Exception as e:
-            metrics["mape"] = np.nan
-
-        # RMSLE con manejo robusto de valores no positivos
-        try:
-            # Asegurar que todos los valores sean positivos
-            y_true_pos = np.maximum(y_true_filtered, 1e-10)
-            y_pred_pos = np.maximum(y_pred_filtered, 1e-10)
-
-            # Para RANSAC, considerar una transformación logarítmica más robusta
-            if model_type == "ransac":
-                # Suavizar aún más los valores para evitar problemas numéricos
-                y_true_log = np.log1p(y_true_pos)
-                y_pred_log = np.log1p(y_pred_pos)
-
-                # Calcular RMSLE con manejo de outliers
-                log_errors = y_true_log - y_pred_log
-                # Recortar errores extremos (2% superior e inferior)
-                lower_bound = np.percentile(log_errors, 2)
-                upper_bound = np.percentile(log_errors, 98)
-                log_errors_trimmed = log_errors[
-                    (log_errors >= lower_bound) & (log_errors <= upper_bound)
+        if len(y_true) < 2:
+            return {
+                m: np.nan
+                for m in [
+                    "r2",
+                    "mae",
+                    "rmse",
+                    "medae",
+                    "explained_variance",
+                    "mape",
+                    "rmsle",
                 ]
+            }
 
-                if len(log_errors_trimmed) > 0:
-                    metrics["rmsle"] = np.sqrt(np.mean(log_errors_trimmed**2))
-                else:
-                    metrics["rmsle"] = np.nan
-            else:
-                # Para modelos lineales estándar, usar RMSLE normal
-                metrics["rmsle"] = np.sqrt(
-                    mean_squared_error(np.log1p(y_true_pos), np.log1p(y_pred_pos))
-                )
-        except Exception as e:
-            metrics["rmsle"] = np.nan
-
+        metrics["r2"] = r2_score(y_true, y_pred)
+        metrics["mae"] = mean_absolute_error(y_true, y_pred)
+        metrics["rmse"] = np.sqrt(mean_squared_error(y_true, y_pred))
+        metrics["medae"] = median_absolute_error(y_true, y_pred)
+        metrics["explained_variance"] = explained_variance_score(y_true, y_pred)
+        metrics["mape"] = mean_absolute_percentage_error(y_true, y_pred)
+        y_true_pos, y_pred_pos = np.maximum(y_true, 1e-10), np.maximum(y_pred, 1e-10)
+        metrics["rmsle"] = np.sqrt(
+            mean_squared_error(np.log1p(y_true_pos), np.log1p(y_pred_pos))
+        )
         return metrics
-
-    def train_model(
-        self,
-        test_size: float = 0.2,
-        random_state: int = 42,
-    ) -> Dict[str, Dict[str, Any]]:
-        """
-        Entrenar ambos modelos (Lineal y RANSAC) para Stage 4 y Stage 8
-        Retorna resultados con métricas y predicciones de ambos.
-        """
-
-        # 1. Cargar datos y preparar ciclos
-        self.load_data()
-        self.transform_cycles_data()
-        datasets_by_stage = self.get_datasets_by_stage()
-
-        # Verificación mínima de datos
-        if datasets_by_stage["stage_4"].shape[0] < 10:
-            print("⚠️  Advertencia: Pocos datos para Stage 4")
-        if datasets_by_stage["stage_8"].shape[0] < 10:
-            print("⚠️  Advertencia: Pocos datos para Stage 8")
-
-        # 2. Preparar datos
-        self.prepared_data_stage_4 = self.prepare_data_for_stage(
-            datasets_by_stage["stage_4"], "stage_4", test_size, random_state
-        )
-        self.prepared_data_stage_8 = self.prepare_data_for_stage(
-            datasets_by_stage["stage_8"], "stage_8", test_size, random_state
-        )
-
-        # 3. Entrenar LINEAR
-        self.mlr_model_stage_4 = LinearRegression()
-        self.mlr_model_stage_8 = LinearRegression()
-        self.mlr_model_stage_4.fit(
-            self.prepared_data_stage_4["X_train"], self.prepared_data_stage_4["y_train"]
-        )
-        self.mlr_model_stage_8.fit(
-            self.prepared_data_stage_8["X_train"], self.prepared_data_stage_8["y_train"]
-        )
-
-        # 4. Entrenar RANSAC
-        self.ransac_model_stage_4 = self.ransac_regression_model(
-            X_train=self.prepared_data_stage_4["X_train"],
-            y_train=self.prepared_data_stage_4["y_train"],
-        )
-        self.ransac_model_stage_8 = self.ransac_regression_model(
-            X_train=self.prepared_data_stage_8["X_train"],
-            y_train=self.prepared_data_stage_8["y_train"],
-        )
-
-        # 5. Predicciones LINEAR
-        mlr_y_train_pred_4 = self.mlr_model_stage_4.predict(
-            self.prepared_data_stage_4["X_train"]
-        )
-        mlr_y_test_pred_4 = self.mlr_model_stage_4.predict(
-            self.prepared_data_stage_4["X_test"]
-        )
-        mlr_y_train_pred_8 = self.mlr_model_stage_8.predict(
-            self.prepared_data_stage_8["X_train"]
-        )
-        mlr_y_test_pred_8 = self.mlr_model_stage_8.predict(
-            self.prepared_data_stage_8["X_test"]
-        )
-
-        # 6. Predicciones RANSAC
-        ransac_y_train_pred_4 = self.ransac_model_stage_4.predict(
-            self.prepared_data_stage_4["X_train"]
-        )
-        ransac_y_test_pred_4 = self.ransac_model_stage_4.predict(
-            self.prepared_data_stage_4["X_test"]
-        )
-        ransac_y_train_pred_8 = self.ransac_model_stage_8.predict(
-            self.prepared_data_stage_8["X_train"]
-        )
-        ransac_y_test_pred_8 = self.ransac_model_stage_8.predict(
-            self.prepared_data_stage_8["X_test"]
-        )
-
-        # 7. Métricas LINEAR
-        mlr_train_metrics_4 = self.calculate_metrics(
-            self.prepared_data_stage_4["y_train"],
-            mlr_y_train_pred_4,
-            model_type="linear",
-        )
-        mlr_test_metrics_4 = self.calculate_metrics(
-            self.prepared_data_stage_4["y_test"], mlr_y_test_pred_4, model_type="linear"
-        )
-        mlr_train_metrics_8 = self.calculate_metrics(
-            self.prepared_data_stage_8["y_train"],
-            mlr_y_train_pred_8,
-            model_type="linear",
-        )
-        mlr_test_metrics_8 = self.calculate_metrics(
-            self.prepared_data_stage_8["y_test"], mlr_y_test_pred_8, model_type="linear"
-        )
-
-        # 8. Métricas RANSAC
-        ransac_train_metrics_4 = self.calculate_metrics(
-            self.prepared_data_stage_4["y_train"],
-            ransac_y_train_pred_4,
-            model_type="ransac",
-        )
-        ransac_test_metrics_4 = self.calculate_metrics(
-            self.prepared_data_stage_4["y_test"],
-            ransac_y_test_pred_4,
-            model_type="ransac",
-        )
-        ransac_train_metrics_8 = self.calculate_metrics(
-            self.prepared_data_stage_8["y_train"],
-            ransac_y_train_pred_8,
-            model_type="ransac",
-        )
-        ransac_test_metrics_8 = self.calculate_metrics(
-            self.prepared_data_stage_8["y_test"],
-            ransac_y_test_pred_8,
-            model_type="ransac",
-        )
-
-        # 9. Resultados Stage 4
-        self.model_results_stage_4 = {
-            "X_train": self.prepared_data_stage_4["X_train"],
-            "X_test": self.prepared_data_stage_4["X_test"],
-            "y_train": self.prepared_data_stage_4["y_train"],
-            "y_test": self.prepared_data_stage_4["y_test"],
-            "mlr_y_train_pred": mlr_y_train_pred_4,
-            "mlr_y_test_pred": mlr_y_test_pred_4,
-            "ransac_y_train_pred": ransac_y_train_pred_4,
-            "ransac_y_test_pred": ransac_y_test_pred_4,
-            "train_samples": self.prepared_data_stage_4["train_samples"],
-            "test_samples": self.prepared_data_stage_4["test_samples"],
-            "total_features": self.prepared_data_stage_4["total_features"],
-            **{f"mlr_train_{k}": v for k, v in mlr_train_metrics_4.items()},
-            **{f"mlr_test_{k}": v for k, v in mlr_test_metrics_4.items()},
-            **{f"ransac_train_{k}": v for k, v in ransac_train_metrics_4.items()},
-            **{f"ransac_test_{k}": v for k, v in ransac_test_metrics_4.items()},
-        }
-
-        # 10. Resultados Stage 8
-        self.model_results_stage_8 = {
-            "X_train": self.prepared_data_stage_8["X_train"],
-            "X_test": self.prepared_data_stage_8["X_test"],
-            "y_train": self.prepared_data_stage_8["y_train"],
-            "y_test": self.prepared_data_stage_8["y_test"],
-            "mlr_y_train_pred": mlr_y_train_pred_8,
-            "mlr_y_test_pred": mlr_y_test_pred_8,
-            "ransac_y_train_pred": ransac_y_train_pred_8,
-            "ransac_y_test_pred": ransac_y_test_pred_8,
-            "train_samples": self.prepared_data_stage_8["train_samples"],
-            "test_samples": self.prepared_data_stage_8["test_samples"],
-            "total_features": self.prepared_data_stage_8["total_features"],
-            **{f"mlr_train_{k}": v for k, v in mlr_train_metrics_8.items()},
-            **{f"mlr_test_{k}": v for k, v in mlr_test_metrics_8.items()},
-            **{f"ransac_train_{k}": v for k, v in ransac_train_metrics_8.items()},
-            **{f"ransac_test_{k}": v for k, v in ransac_test_metrics_8.items()},
-        }
-
-        # 11. Retorno final
-        return {
-            "model_results_stage_4": self.model_results_stage_4,
-            "model_results_stage_8": self.model_results_stage_8,
-            "mlr_model_stage_4": self.mlr_model_stage_4,
-            "mlr_model_stage_8": self.mlr_model_stage_8,
-            "ransac_model_stage_4": self.ransac_model_stage_4,
-            "ransac_model_stage_8": self.ransac_model_stage_8,
-            "feature_scaler_stage_4": self.feature_scaler_stage_4,
-            "feature_scaler_stage_8": self.feature_scaler_stage_8,
-            "destination_encoder_stage_4": self.destination_encoder_stage_4,
-            "destination_encoder_stage_8": self.destination_encoder_stage_8,
-        }
 
     def ransac_regression_model(self, X_train, y_train, n_seeds=25):
         """
-        Crear y retornar un modelo de regresión RANSAC optimizado.
-        Basado en la implementación anterior que entregaba mejores resultados.
-        """
-        print("Optimizando modelo RANSAC...")
+        Create and return an optimized RANSAC regression model
 
+        This method performs hyperparameter optimization for RANSAC regression by testing
+        multiple configurations with different random seeds to find the best performing model.
+
+        Args:
+            X_train: Training feature matrix
+            y_train: Training target values
+            n_seeds (int, optional): Number of random seeds to test per configuration.
+                                    Defaults to 25.
+
+        Returns:
+            RANSACRegressor: Best performing RANSAC model fitted on training datCrear y retornar un modelo de regresión RANSAC optimizado.
+        """
+        logger.info("Iniciando optimización de modelo RANSAC...")
         n_samples, n_features = X_train.shape
 
-        # Configuraciones adaptadas al tamaño de los datos (como en la versión anterior)
+        # Define multiple RANSAC configurations with different hyperparameters
         configurations = [
-            # Configuración conservadora
             {
                 "min_samples": max(n_features + 1, n_samples // 10),
                 "residual_threshold": None,
@@ -535,7 +377,6 @@ class LinearRegressionMultivariable:
                 "stop_probability": 0.90,
                 "loss": "absolute_error",
             },
-            # Configuración permisiva
             {
                 "min_samples": max(n_features + 1, n_samples // 15),
                 "residual_threshold": None,
@@ -544,7 +385,6 @@ class LinearRegressionMultivariable:
                 "stop_probability": 0.95,
                 "loss": "absolute_error",
             },
-            # Configuración muy permisiva
             {
                 "min_samples": max(n_features + 1, n_samples // 20),
                 "residual_threshold": None,
@@ -558,73 +398,115 @@ class LinearRegressionMultivariable:
         best_score = -np.inf
         best_ransac_model = None
         best_optimization_metrics = {}
+        last_logged_metrics = {}
 
         total_tests = len(configurations) * n_seeds
         current_test = 0
 
         for config_idx, config in enumerate(configurations):
-            print(f"Probando configuración {config_idx + 1}/{len(configurations)}")
+            logger.info(
+                f"Probando configuración {config_idx + 1}/{len(configurations)}"
+            )
 
             for seed in range(n_seeds):
                 current_test += 1
                 try:
+                    # Create RANSAC model with current configuration and seed
                     params = config.copy()
                     params["random_state"] = seed
-
-                    # Entrenar modelo RANSAC
                     ransac = linear_model.RANSACRegressor(**params)
                     ransac.fit(X_train, y_train)
 
-                    # Calcular métricas en datos de entrenamiento
+                    # Calculate training performance metrics
                     y_train_pred = ransac.predict(X_train)
                     r2_train = r2_score(y_train, y_train_pred)
                     mae_train = mean_absolute_error(y_train, y_train_pred)
 
-                    # Métricas específicas de RANSAC
-                    inlier_mask = ransac.inlier_mask_
-                    n_inliers = np.sum(inlier_mask)
-                    inlier_ratio = n_inliers / len(y_train)
+                    # Calculate RANSAC-specific effectiveness metrics
+                    inlier_mask = ransac.inlier_mask_  # Boolean mask of inliers
+                    n_inliers = np.sum(inlier_mask)  # Count of inlier points
+                    inlier_ratio = n_inliers / len(y_train)  # Proportion of inliers
 
-                    # R² en inliers
-                    if n_inliers > n_features + 1:
-                        r2_inliers = r2_score(
-                            y_train[inlier_mask], y_train_pred[inlier_mask]
-                        )
-                    else:
-                        r2_inliers = -np.inf
-
-                    # Score compuesto para optimización (igual que en la versión anterior)
-                    composite_score = (
-                        0.6 * max(0, r2_train)
-                        + 0.2 * max(0, r2_inliers)
-                        + 0.15 * inlier_ratio
-                        + 0.05
-                        * max(0, 1 - mae_train / (np.max(y_train) - np.min(y_train)))
+                    # Calculate R² on inliers only (model's core performance)
+                    r2_inliers = (
+                        r2_score(y_train[inlier_mask], y_train_pred[inlier_mask])
+                        if n_inliers > n_features + 1
+                        else -np.inf
                     )
 
+                    # Composite scoring function combining multiple criteria
+                    composite_score = (
+                        0.6 * max(0, r2_train)  # Overall fit quality (60%)
+                        + 0.2 * max(0, r2_inliers)  # Inlier fit quality (20%)
+                        + 0.15 * inlier_ratio  # Inlier proportion (15%)
+                        + 0.05
+                        * max(
+                            0, 1 - mae_train / (np.max(y_train) - np.min(y_train))
+                        )  # Normalized MAE (5%)
+                    )
+
+                    # Update best model if current one is better and has positive R²
                     if composite_score > best_score and r2_train > 0:
                         best_score = composite_score
                         best_ransac_model = ransac
-                        best_optimization_metrics = {
+                        current_metrics = {
                             "r2_train": r2_train,
                             "r2_inliers": r2_inliers,
                             "mae_train": mae_train,
                             "n_inliers": n_inliers,
                             "inlier_ratio": inlier_ratio,
                             "composite_score": composite_score,
-                            "n_trials": ransac.n_trials_,
+                            "n_trials": ransac.n_trials_,  # Actual trials used by RANSAC
                         }
 
-                    if current_test % 10 == 0:
-                        progress = (current_test / total_tests) * 100
-                        best_r2 = best_optimization_metrics.get("r2_train", 0)
-                        print(f"Progreso: {progress:.1f}% - Mejor R²: {best_r2:.4f}")
+                        # Determine if this represents a significant improvement
+                        has_improvement = False
+                        if not last_logged_metrics:
+                            has_improvement = True  # first valid found
+                        else:
+                            # Check for improvement in key metrics
+                            if (
+                                current_metrics["r2_train"]
+                                > last_logged_metrics.get("r2_train", -np.inf)
+                                or current_metrics["composite_score"]
+                                > last_logged_metrics.get("composite_score", -np.inf)
+                                or current_metrics["mae_train"]
+                                < last_logged_metrics.get("mae_train", np.inf)
+                            ):
+                                has_improvement = True
+                        # Log improvement details
+                        if has_improvement:
+                            best_optimization_metrics = current_metrics
+                            last_logged_metrics = current_metrics.copy()
 
+                            logger.info("==== MEJORA ENCONTRADA ====")
+                            logger.info(
+                                f"Test {current_test}/{total_tests} - Nueva mejor configuración:"
+                            )
+                            logger.info(f"R² Train: {current_metrics['r2_train']:.4f}")
+                            logger.info(
+                                f"R² Inliers: {current_metrics['r2_inliers']:.4f}"
+                            )
+                            logger.info(
+                                f"MAE Train: {current_metrics['mae_train']:.4f}"
+                            )
+                            logger.info(
+                                f"Inliers: {current_metrics['n_inliers']} ({current_metrics['inlier_ratio']:.4f})"
+                            )
+                            logger.info(
+                                f"Score Compuesto: {current_metrics['composite_score']:.4f}"
+                            )
+                            logger.info(f"Trials: {current_metrics['n_trials']}")
                 except Exception as e:
+                    # Log errors for debugging but continue optimization
+                    logger.debug(
+                        f"Error en configuración {config_idx}, seed {seed}: {str(e)}"
+                    )
                     continue
 
+        # Fallback to default RANSAC if optimization failed
         if best_ransac_model is None:
-            print("Usando configuración RANSAC por defecto...")
+            logger.info("Usando configuración RANSAC por defecto...")
             best_ransac_model = linear_model.RANSACRegressor(
                 min_samples=max(n_features + 1, 10),
                 max_trials=500,
@@ -632,373 +514,266 @@ class LinearRegressionMultivariable:
             )
             best_ransac_model.fit(X_train, y_train)
 
-        print(f"\n✓ Optimización RANSAC completada:")
-        print(
-            f"  - R² entrenamiento: {best_optimization_metrics.get('r2_train', 0):.4f}"
-        )
-        print(
-            f"  - Ratio de inliers: {best_optimization_metrics.get('inlier_ratio', 0):.4f}"
-        )
-        print(f"  - N° inliers: {best_optimization_metrics.get('n_inliers', 0)}")
-
         return best_ransac_model
 
-    def show_results_summary(self):
+    def train_models(
+        self, test_size: float = 0.2, random_state: int = 42
+    ) -> Dict[str, Any]:
         """
-        Mostrar resumen de resultados de ambos modelos (MLR y RANSAC) para Stage 4 y Stage 8
-        """
-        if not self.model_results_stage_4 or not self.model_results_stage_8:
-            print("❌ No hay resultados disponibles. Entrena los modelos primero.")
-            return
+        Train both models without validation (Stage 4 and Stage 8)
 
-        print("\n" + "=" * 80)
-        print("📈 RESUMEN DE RESULTADOS - MLR y RANSAC")
-        print("=" * 80)
-
-        # Función auxiliar para formatear valores, manejando NaN e infinitos
-        def format_value(value, precision=4):
-            if value is None or (
-                isinstance(value, float) and (np.isnan(value) or np.isinf(value))
-            ):
-                return "N/A"
-            try:
-                return f"{value:.{precision}f}"
-            except:
-                return str(value)
-
-        # === Stage 4 ===
-        print("\n🔵 STAGE 4 (Camión vacío)")
-        print("-" * 60)
-        print(
-            f"Muestras entrenamiento: {self.model_results_stage_4.get('train_samples', 'N/A')}"
-        )
-        print(
-            f"Muestras prueba: {self.model_results_stage_4.get('test_samples', 'N/A')}"
-        )
-
-        # --- MLR ---
-        print("\n  📊 Linear Regression:")
-        print(
-            f"    R² Score: {format_value(self.model_results_stage_4.get('mlr_test_r2'))}"
-        )
-        print(
-            f"    MAE: {format_value(self.model_results_stage_4.get('mlr_test_mae'))}"
-        )
-        print(
-            f"    RMSE: {format_value(self.model_results_stage_4.get('mlr_test_rmse'))}"
-        )
-        print(
-            f"    MAPE: {format_value(self.model_results_stage_4.get('mlr_test_mape'), 2)}%"
-        )
-        print(
-            f"    RMSLE: {format_value(self.model_results_stage_4.get('mlr_test_rmsle'))}"
-        )
-
-        # --- RANSAC ---
-        print("\n  📊 RANSAC Regression:")
-        print(
-            f"    R² Score: {format_value(self.model_results_stage_4.get('ransac_test_r2'))}"
-        )
-        print(
-            f"    MAE: {format_value(self.model_results_stage_4.get('ransac_test_mae'))}"
-        )
-        print(
-            f"    RMSE: {format_value(self.model_results_stage_4.get('ransac_test_rmse'))}"
-        )
-        print(
-            f"    MAPE: {format_value(self.model_results_stage_4.get('ransac_test_mape'), 2)}%"
-        )
-        print(
-            f"    RMSLE: {format_value(self.model_results_stage_4.get('ransac_test_rmsle'))}"
-        )
-
-        # === Stage 8 ===
-        print("\n🔴 STAGE 8 (Camión cargado)")
-        print("-" * 60)
-        print(
-            f"Muestras entrenamiento: {self.model_results_stage_8.get('train_samples', 'N/A')}"
-        )
-        print(
-            f"Muestras prueba: {self.model_results_stage_8.get('test_samples', 'N/A')}"
-        )
-
-        # --- MLR ---
-        print("\n  📊 Linear Regression:")
-        print(
-            f"    R² Score: {format_value(self.model_results_stage_8.get('mlr_test_r2'))}"
-        )
-        print(
-            f"    MAE: {format_value(self.model_results_stage_8.get('mlr_test_mae'))}"
-        )
-        print(
-            f"    RMSE: {format_value(self.model_results_stage_8.get('mlr_test_rmse'))}"
-        )
-        print(
-            f"    MAPE: {format_value(self.model_results_stage_8.get('mlr_test_mape'), 2)}%"
-        )
-        print(
-            f"    RMSLE: {format_value(self.model_results_stage_8.get('mlr_test_rmsle'))}"
-        )
-
-        # --- RANSAC ---
-        print("\n  📊 RANSAC Regression:")
-        print(
-            f"    R² Score: {format_value(self.model_results_stage_8.get('ransac_test_r2'))}"
-        )
-        print(
-            f"    MAE: {format_value(self.model_results_stage_8.get('ransac_test_mae'))}"
-        )
-        print(
-            f"    RMSE: {format_value(self.model_results_stage_8.get('ransac_test_rmse'))}"
-        )
-        print(
-            f"    MAPE: {format_value(self.model_results_stage_8.get('ransac_test_mape'), 2)}%"
-        )
-        print(
-            f"    RMSLE: {format_value(self.model_results_stage_8.get('ransac_test_rmsle'))}"
-        )
-
-        print("\n" + "=" * 80)
-
-    def save_predictions_csv(self, filename: str = "fuel_predictions.csv"):
-        """
-        Guarda un CSV con los datos de ciclos, metadatos y predicciones de ambos modelos
+        This method performs end-to-end training of regression models for two different
+        manufacturing stages, including data preparation, model training, and evaluation.
 
         Args:
-            filename (str): Nombre del archivo CSV a guardar
-        """
-        # Verificar que tenemos datos de ciclos
-        if self.cycles_data.is_empty():
-            print("❌ No hay datos de ciclos. Ejecuta transform_cycles_data() primero.")
-            return
-
-        # Verificar que tenemos modelos entrenados
-        if (
-            self.mlr_model_stage_4 is None
-            or self.mlr_model_stage_8 is None
-            or self.ransac_model_stage_4 is None
-            or self.ransac_model_stage_8 is None
-        ):
-            print("❌ No hay modelos entrenados. Ejecuta train_model() primero.")
-            return
-
-        # Crear una copia de los datos de ciclos
-        output_data = self.cycles_data.clone()
-
-        # Preparar arrays para las predicciones
-        n_samples = len(output_data)
-        predicted_fuel_lr = np.full(n_samples, np.nan)
-        predicted_fuel_ransac = np.full(n_samples, np.nan)
-        residual_lr = np.full(n_samples, np.nan)
-        residual_ransac = np.full(n_samples, np.nan)
-        is_inlier = np.full(n_samples, False)
-        is_outlier = np.full(n_samples, False)
-
-        # Procesar datos para Stage 4
-        stage_4_data = output_data.filter(pl.col("StageSequence") == 4)
-        if not stage_4_data.is_empty():
-            X_stage_4 = self._prepare_stage_data_for_prediction(stage_4_data, "stage_4")
-
-            # Predecir con ambos modelos
-            lr_pred_4 = self.mlr_model_stage_4.predict(X_stage_4)
-            ransac_pred_4 = self.ransac_model_stage_4.predict(X_stage_4)
-
-            # Obtener índices de Stage 4 en el DataFrame completo
-            stage_4_indices = output_data.filter(pl.col("StageSequence") == 4)[
-                "cycle_group"
-            ].to_list()
-            idx_map_4 = {
-                cycle_group: i
-                for i, cycle_group in enumerate(output_data["cycle_group"].to_list())
-            }
-
-            # Asignar predicciones
-            for i, cycle_group in enumerate(stage_4_data["cycle_group"].to_list()):
-                idx = idx_map_4[cycle_group]
-                predicted_fuel_lr[idx] = lr_pred_4[i]
-                predicted_fuel_ransac[idx] = ransac_pred_4[i]
-                residual_lr[idx] = stage_4_data["FuelConsumed"][i] - lr_pred_4[i]
-                residual_ransac[idx] = (
-                    stage_4_data["FuelConsumed"][i] - ransac_pred_4[i]
-                )
-
-            # Marcar inliers para RANSAC
-            if hasattr(self.ransac_model_stage_4, "inlier_mask_"):
-                inlier_mask_4 = self.ransac_model_stage_4.inlier_mask_
-                for i, cycle_group in enumerate(stage_4_data["cycle_group"].to_list()):
-                    if i < len(inlier_mask_4):
-                        idx = idx_map_4[cycle_group]
-                        is_inlier[idx] = inlier_mask_4[i]
-                        is_outlier[idx] = not inlier_mask_4[i]
-
-        # Procesar datos para Stage 8
-        stage_8_data = output_data.filter(pl.col("StageSequence") == 8)
-        if not stage_8_data.is_empty():
-            X_stage_8 = self._prepare_stage_data_for_prediction(stage_8_data, "stage_8")
-
-            # Predecir con ambos modelos
-            lr_pred_8 = self.mlr_model_stage_8.predict(X_stage_8)
-            ransac_pred_8 = self.ransac_model_stage_8.predict(X_stage_8)
-
-            # Obtener índices de Stage 8 en el DataFrame completo
-            stage_8_indices = output_data.filter(pl.col("StageSequence") == 8)[
-                "cycle_group"
-            ].to_list()
-            idx_map_8 = {
-                cycle_group: i
-                for i, cycle_group in enumerate(output_data["cycle_group"].to_list())
-            }
-
-            # Asignar predicciones
-            for i, cycle_group in enumerate(stage_8_data["cycle_group"].to_list()):
-                idx = idx_map_8[cycle_group]
-                predicted_fuel_lr[idx] = lr_pred_8[i]
-                predicted_fuel_ransac[idx] = ransac_pred_8[i]
-                residual_lr[idx] = stage_8_data["FuelConsumed"][i] - lr_pred_8[i]
-                residual_ransac[idx] = (
-                    stage_8_data["FuelConsumed"][i] - ransac_pred_8[i]
-                )
-
-            # Marcar inliers para RANSAC
-            if hasattr(self.ransac_model_stage_8, "inlier_mask_"):
-                inlier_mask_8 = self.ransac_model_stage_8.inlier_mask_
-                for i, cycle_group in enumerate(stage_8_data["cycle_group"].to_list()):
-                    if i < len(inlier_mask_8):
-                        idx = idx_map_8[cycle_group]
-                        is_inlier[idx] = inlier_mask_8[i]
-                        is_outlier[idx] = not inlier_mask_8[i]
-
-        # Añadir todas las columnas al DataFrame
-        output_data = output_data.with_columns(
-            [
-                pl.Series("predicted_fuel_lr", predicted_fuel_lr),
-                pl.Series("predicted_fuel_ransac", predicted_fuel_ransac),
-                pl.Series("residual_lr", residual_lr),
-                pl.Series("residual_ransac", residual_ransac),
-                pl.Series("is_inlier", is_inlier),
-                pl.Series("is_outlier", is_outlier),
-            ]
-        )
-
-        # Seleccionar solo las columnas requeridas
-        final_columns = [
-            "cycle_group",
-            "TimeStampIni",
-            "TimeStampFin",
-            "ShiftDate",
-            "Equipment",
-            "TruckFleet",
-            "StartCycle",
-            "EndCycle",
-            "AverageSpeed",
-            "AvgRPM",
-            "AvgSlopePercent",
-            "AvgAcceleration",
-            "TotalMeasuredTonnage",
-            "Distance",
-            "StageSequence",
-            "Destination",
-            "RecordsInCycle",
-            "FuelConsumed",
-            "CycleDurationSeconds",
-            "is_inlier",
-            "is_outlier",
-            "predicted_fuel_lr",
-            "predicted_fuel_ransac",
-            "residual_lr",
-            "residual_ransac",
-        ]
-
-        # Filtrar solo filas con predicciones válidas
-        valid_predictions = output_data.filter(
-            pl.col("predicted_fuel_lr").is_not_null()
-            | pl.col("predicted_fuel_ransac").is_not_null()
-        )
-
-        # Guardar a CSV
-        valid_predictions.select(final_columns).write_csv(filename)
-        print(f"✅ CSV guardado como {filename} con {len(valid_predictions)} registros")
-
-    def _prepare_stage_data_for_prediction(
-        self, data: pl.DataFrame, stage: str
-    ) -> np.ndarray:
-        """
-        Prepara datos para predicción usando los mismos preprocesadores del entrenamiento
-
-        Args:
-            data (pl.DataFrame): Datos a preparar
-            stage (str): Etapa para la cual preparar los datos ("stage_4" o "stage_8")
+            test_size (float, optional): Proportion of dataset to include in the test split.
+                                    Defaults to 0.2 (20%).
+            random_state (int, optional): Random seed for reproducible train/test splits.
+                                        Defaults to 42.
 
         Returns:
-            np.ndarray: Datos preparados para predicción
+            Dict[str, Any]: Comprehensive training results containing:
+                - stage_4: Dictionary with Stage 4 model results
+                - stage_8: Dictionary with Stage 8 model results
+                - multicollinearity: Multicollinearity analysis results
+
+                Each stage dictionary contains:
+                    - model: Trained RANSAC regression model
+                    - scaler: Data scaler used for normalization
+                    - samples: Train/test sample counts
+                    - train_metrics: Training performance metrics
+                    - test_metrics: Testing performance metrics
+                    - model_parameters: Inverse-scaled model parameters
         """
-        # Extraer variables predictoras numéricas
-        X_numeric = data.select(self.predictor_vars).to_pandas()
+        # load and transform data
+        self.load_data()
+        self.transform_cycles_data()
 
-        # Extraer variable categórica
-        X_destination = data.select("Destination").to_pandas()
+        # Separate data by stage for independent model training
+        stage_4_data = self.cycles_data.filter(pl.col("StageSequence") == 4)
+        stage_8_data = self.cycles_data.filter(pl.col("StageSequence") == 8)
 
-        # Seleccionar encoder y scaler según el stage
-        if stage == "stage_4":
-            destination_encoder = self.destination_encoder_stage_4
-            feature_scaler = self.feature_scaler_stage_4
-        else:
-            destination_encoder = self.destination_encoder_stage_8
-            feature_scaler = self.feature_scaler_stage_8
+        logger.info("Entrenando el modelo stage_4")
 
-        # Codificación binaria para variable categórica 'Destination'
-        X_dest_encoded = destination_encoder.transform(X_destination).to_numpy()
+        # Prepare and scale Stage 4 data for training
+        stage_4_scaled_data = self.prepare_data_for_stage(
+            stage_4_data,
+            self.scaler_stage_4,
+            self.iso_forest_stage_4,
+            test_size,
+            random_state,
+        )
+        self.model_stage_4 = self.ransac_regression_model(
+            stage_4_scaled_data["X_train"], stage_4_scaled_data["y_train"]
+        )
 
-        # Estandarización de variables numéricas
-        X_numeric_scaled = feature_scaler.transform(X_numeric)
+        y_pred_train_4 = self.model_stage_4.predict(stage_4_scaled_data["X_train"])
+        y_pred_test_4 = self.model_stage_4.predict(stage_4_scaled_data["X_test"])
 
-        # Combinar características numéricas escaladas y categóricas codificadas
-        return np.hstack([X_numeric_scaled, X_dest_encoded])
+        logger.info("Entrenando el modelo stage_8")
 
+        # Prepare and scale Stage 8 data for training
+        stage_8_scaled_data = self.prepare_data_for_stage(
+            stage_8_data,
+            self.scaler_stage_8,
+            self.iso_forest_stage_8,
+            test_size,
+            random_state,
+        )
+        self.model_stage_8 = self.ransac_regression_model(
+            stage_8_scaled_data["X_train"], stage_8_scaled_data["y_train"]
+        )
+        y_pred_train_8 = self.model_stage_8.predict(stage_8_scaled_data["X_train"])
+        y_pred_test_8 = self.model_stage_8.predict(stage_8_scaled_data["X_test"])
 
-def main():
-    """
-    Función principal para ejecutar el modelo y guardar las predicciones
-    """
-    # Definir variables predictoras
-    predictor_variables = [
-        "AverageSpeed",
-        "AvgSlopePercent",
-        "AvgAcceleration",
-        "TotalMeasuredTonnage",
-        "Distance",
-        "CycleDurationSeconds",
-    ]
+        logger.info("Entrenamiento completado.")
 
-    try:
-        # 1. Crear instancia y entrenar ambos modelos
-        print("🚀 Creando modelo...")
-        mi_model = LinearRegressionMultivariable(predictor_variables)
+        # Compile comprehensive results dictionary with all training outcomes
+        result = {
+            "stage_4": {
+                "model": self.model_stage_4,
+                "scaler": self.scaler_stage_4,
+                "isolation_forest": self.iso_forest_stage_4,
+                "samples": {
+                    "train": len(stage_4_scaled_data["y_train"]),
+                    "test": len(stage_4_scaled_data["y_test"]),
+                },
+                "train_metrics": self.calculate_metrics(
+                    stage_4_scaled_data["y_train"], y_pred_train_4
+                ),
+                "test_metrics": self.calculate_metrics(
+                    stage_4_scaled_data["y_test"], y_pred_test_4
+                ),
+                "model_parameters": self.inverse_scale(
+                    self.model_stage_4, self.scaler_stage_4
+                ),
+                "outlier_info": stage_4_scaled_data["outlier_info"],
+            },
+            "stage_8": {
+                "model": self.model_stage_8,
+                "scaler": self.scaler_stage_8,
+                "isolation_forest": self.iso_forest_stage_8,
+                "samples": {
+                    "train": len(stage_8_scaled_data["y_train"]),
+                    "test": len(stage_8_scaled_data["y_test"]),
+                },
+                "train_metrics": self.calculate_metrics(
+                    stage_8_scaled_data["y_train"], y_pred_train_8
+                ),
+                "test_metrics": self.calculate_metrics(
+                    stage_8_scaled_data["y_test"], y_pred_test_8
+                ),
+                "model_parameters": self.inverse_scale(
+                    self.model_stage_8, self.scaler_stage_8
+                ),
+                "outlier_info": stage_8_scaled_data["outlier_info"],
+            },
+            "multicollinearity": self.analyze_multicollinearity(),
+        }
 
-        print("🔄 Entrenando modelos...")
-        resultados = mi_model.train_model()
+        self.log_results(stage="all", results=result)
 
-        # 2. Mostrar resumen de resultados
-        mi_model.show_results_summary()
+        return result
 
-        # 3. Guardar predicciones en CSV
-        print("💾 Guardando predicciones en CSV...")
-        mi_model.save_predictions_csv("predicciones_combustible.csv")
+    def inverse_scale(self, model, scaler) -> Dict[str, Any]:
+        """
+        Extract model parameters in original units (undoing the scaling).
+        """
+        if not hasattr(model, "estimator_"):
+            return {"error": "Modelo base no encontrado en RANSAC."}
 
-        print("✅ Proceso completado exitosamente!")
+        betas_scaled = model.estimator_.coef_
+        intercept_scaled = model.estimator_.intercept_
 
-        return mi_model, resultados
+        scale = scaler.scale_
+        mean = scaler.mean_
 
-    except FileNotFoundError:
-        print("❌ Archivo 'unified_data_T-210.csv' no encontrado.")
-        return None, None
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
+        # Ajustar coeficientes a espacio original
+        betas_original = betas_scaled / scale
+        intercept_original = intercept_scaled - np.sum(betas_scaled * mean / scale)
 
-        traceback.print_exc()
-        return None, None
+        return {
+            "intercept": intercept_original,
+            "coefficients": dict(zip(self.predictor_vars, betas_original)),
+        }
+
+    def analyze_multicollinearity(self) -> dict:
+        """
+        Analyze multicollinearity among predictor variables using:
+            - Pearson correlation matrix
+            - Variance Inflation Factor (VIF)
+        Applied directly on self.cycles_data (unscaled data).
+        """
+        df = self.cycles_data[self.predictor_vars].drop_nulls().drop_nans().to_pandas()
+
+        # Correlation matrix
+        corr_matrix = df.corr(method="pearson").to_dict()
+
+        # VIF
+        vif_data = pd.DataFrame()
+        vif_data["Variable"] = df.columns
+        vif_data = {
+            df.columns[i]: variance_inflation_factor(df.values, i)
+            for i in range(df.shape[1])
+        }
+
+        return {"correlation_matrix": corr_matrix, "vif": vif_data}
+
+    def log_results(self, stage: str, results: dict):
+        """
+        Logs all training results in a structured way.
+        """
+        log_entry = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "stage": stage,
+            "predictors": self.predictor_vars,
+            "results": results,
+        }
+
+        # save as json
+        logger.info(
+            "Training summary:\n%s", json.dumps(log_entry, indent=4, default=str)
+        )
+
+    def get_predictions(self) -> pl.DataFrame:
+        """
+        Generate fuel consumption predictions for all cycle data
+
+        This method applies the trained RANSAC regression models to predict fuel consumption
+        for all cycles in the dataset. It maintains the original data structure and order
+        by processing each stage separately and then combining results ordered by timestamp.
+
+        Returns:
+            pl.DataFrame: Complete cycle data with added prediction column:
+                - All original columns preserved in their original order
+                - New column 'PredictedFuelConsumption' with model predictions
+                - Data ordered by TimeStampIni to maintain chronological sequence
+
+        Raises:
+            ValueError: If models haven't been trained yet or cycle data is not available
+            RuntimeError: If prediction fails due to data incompatibility
+        """
+
+        if self.cycles_data is None:
+            raise ValueError("Cycle data not available. Run train_models() first.")
+        if self.model_stage_4 is None or self.model_stage_8 is None:
+            raise ValueError("Models not trained. Run train_models() first.")
+        if self.scaler_stage_4 is None or self.scaler_stage_8 is None:
+            raise ValueError("Scalers not available. Run train_models() first.")
+
+        logger.info("Generating predictions for Stage 4 and Stage 8...")
+
+        predictions = []
+
+        # Stage 4
+        stage_4_data = self.cycles_data.filter(pl.col("StageSequence") == 4)
+        if len(stage_4_data) > 0:
+            features = stage_4_data.select(self.predictor_vars).to_pandas()
+            scaled = self.scaler_stage_4.transform(features)
+            preds = self.model_stage_4.predict(scaled)
+
+            stage_4_pred = stage_4_data.with_columns(
+                pl.Series("PredictedFuelConsumption", preds)
+            )
+            predictions.append(stage_4_pred)
+
+            logger.info(f"Generated {len(preds)} predictions for Stage 4")
+
+        # Stage 8
+        stage_8_data = self.cycles_data.filter(pl.col("StageSequence") == 8)
+        if len(stage_8_data) > 0:
+            features = stage_8_data.select(self.predictor_vars).to_pandas()
+            scaled = self.scaler_stage_8.transform(features)
+            preds = self.model_stage_8.predict(scaled)
+
+            stage_8_pred = stage_8_data.with_columns(
+                pl.Series("PredictedFuelConsumption", preds)
+            )
+            predictions.append(stage_8_pred)
+
+            logger.info(f"Generated {len(preds)} predictions for Stage 8")
+
+        if not predictions:
+            raise RuntimeError("No Stage 4 or Stage 8 data available for predictions.")
+
+        # Concatenar y ordenar por TimeStampIni
+        predictions_df = pl.concat(predictions).sort("TimeStampIni")
+
+        logger.info(f"Final predictions dataframe shape: {predictions_df.shape}")
+        return predictions_df
+
+    def get_cycle_data(self) -> pl.DataFrame:
+        """
+        Returns the processed cycles data used for training and predictions.
+        """
+        if self.cycles_data is None:
+            raise ValueError("Cycle data not available. Run train_models() first.")
+        return self.cycles_data
 
 
 if __name__ == "__main__":
-    modelo, resultados = main()
+    model = LinearRegressionModel()
+    results = model.train_models()
+    predictions_df = model.get_predictions()
+    predictions_df.write_csv("predicted_cycles.csv")
+    logger.info("Predictions saved to predicted_cycles.csv")

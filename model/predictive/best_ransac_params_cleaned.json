@@ -1,9 +1,0 @@
-{
-  "min_samples": 1655,
-  "residual_threshold": null,
-  "max_trials": 800,
-  "stop_score": 0.75,
-  "stop_probability": 0.95,
-  "loss": "absolute_error",
-  "random_state": 11
-}
