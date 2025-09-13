@@ -69,7 +69,7 @@ def get_logger(name: str, log_file: str, console: bool = True):
         logger.setLevel(logging.INFO)
 
         # Handler para archivo
-        file_handler = logging.FileHandler(log_file, mode="a")
+        file_handler = logging.FileHandler(log_file, mode="w")
         file_handler.setFormatter(
             logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
         )

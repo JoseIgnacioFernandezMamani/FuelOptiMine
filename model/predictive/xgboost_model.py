@@ -282,16 +282,16 @@ class XGBoostModel:
     def plot_predictions(self, save_path: str, results: dict):
         """
         Generate visual plots comparing model predictions against actual values.
-
         This method creates two visualizations:
         1. Time series plot showing the progression of predictions vs real values.
         2. Scatter plot comparing predictions against real values with a "perfect fit" line.
-
         Metrics (R² and RMSE) are displayed on the scatter plot for quick interpretation.
 
         Args:
             save_path (str, optional): File path to save the generated plots.
-                                       If None, plots are only displayed.
+                                    If None, plots are only displayed.
+            results (dict, optional): Results dictionary containing metrics.
+                                    If None, will calculate metrics from y_test and y_pred.
 
         Logging:
             - Logs error if model is not trained before plotting.
@@ -301,15 +301,55 @@ class XGBoostModel:
             self.logger.error("Model must be trained before plotting predictions.")
             return
 
-        plt.style.use("default")
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        # Validar que tenemos datos válidos
+        if len(self.y_test) == 0 or len(self.y_pred) == 0:
+            self.logger.error("No hay datos de predicción para graficar.")
+            return
 
-        indices = range(1, len(self.y_test) + 1)
+        # Obtener métricas
+        try:
+            if results and "metrics" in results:
+                # Estructura anidada: results["metrics"]["R2"]
+                r2 = results["metrics"]["R2"]
+                rmse = results["metrics"]["RMSE"]
+            elif results and "R2" in results:
+                # Estructura plana: results["R2"]
+                r2 = results["R2"]
+                rmse = results["RMSE"]
+            else:
+                # Calcular métricas si no se proporcionan
+                from sklearn.metrics import r2_score, mean_squared_error
+
+                r2 = r2_score(self.y_test, self.y_pred)
+                rmse = np.sqrt(mean_squared_error(self.y_test, self.y_pred))
+                self.logger.info(
+                    "Métricas calculadas automáticamente ya que no se proporcionaron en results."
+                )
+        except KeyError as e:
+            self.logger.error(f"Error accediendo a las métricas: {e}")
+            # Calcular métricas como fallback
+            from sklearn.metrics import r2_score, mean_squared_error
+
+            r2 = r2_score(self.y_test, self.y_pred)
+            rmse = np.sqrt(mean_squared_error(self.y_test, self.y_pred))
+
+        plt.style.use("default")
+        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 6))
+
+        # Convertir a numpy arrays si es necesario para evitar problemas de indexing
+        y_test_array = (
+            np.array(self.y_test) if hasattr(self.y_test, "__iter__") else self.y_test
+        )
+        y_pred_array = (
+            np.array(self.y_pred) if hasattr(self.y_pred, "__iter__") else self.y_pred
+        )
+
+        indices = range(1, len(y_test_array) + 1)
 
         # Gráfica 1: Series de tiempo
         ax1.plot(
             indices,
-            self.y_test,
+            y_test_array,
             "o-",
             color="blue",
             alpha=0.7,
@@ -319,7 +359,7 @@ class XGBoostModel:
         )
         ax1.plot(
             indices,
-            self.y_pred,
+            y_pred_array,
             "o-",
             color="red",
             alpha=0.7,
@@ -327,7 +367,6 @@ class XGBoostModel:
             markersize=4,
             linewidth=1,
         )
-
         ax1.set_xlabel("Índice del Registro")
         ax1.set_ylabel("Consumo de Combustible (Litros)")
         ax1.set_title("Predicciones vs Valores Reales (XGBoost Nativo)")
@@ -335,10 +374,12 @@ class XGBoostModel:
         ax1.grid(True, alpha=0.3)
 
         # Gráfica 2: Scatter plot
-        ax2.scatter(self.y_test, self.y_pred, alpha=0.6, color="green")
+        ax2.scatter(y_test_array, y_pred_array, alpha=0.6, color="green", s=30)
 
-        min_val = min(min(self.y_test), min(self.y_pred))
-        max_val = max(max(self.y_test), max(self.y_pred))
+        # Calcular rango para la línea de predicción perfecta
+        min_val = min(np.min(y_test_array), np.min(y_pred_array))
+        max_val = max(np.max(y_test_array), np.max(y_pred_array))
+
         ax2.plot(
             [min_val, max_val],
             [min_val, max_val],
@@ -346,15 +387,13 @@ class XGBoostModel:
             label="Predicción Perfecta",
             linewidth=2,
         )
-
         ax2.set_xlabel("Valores Reales (Litros)")
         ax2.set_ylabel("Predicciones (Litros)")
         ax2.set_title("Scatter Plot: XGBoost con Soporte Nativo")
         ax2.legend()
         ax2.grid(True, alpha=0.3)
 
-        r2 = results["R2"]
-        rmse = results["RMSE"]
+        # Añadir métricas al gráfico
         ax2.text(
             0.05,
             0.95,
@@ -364,11 +403,42 @@ class XGBoostModel:
             bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
         )
 
+        # Gráfica 3: Matriz de correlación
+        if results and "multicollinearity" in results:
+            try:
+                corr_matrix = results["multicollinearity"]["correlation_matrix"]
+                corr_df = pd.DataFrame(corr_matrix)
+                sns.heatmap(
+                    corr_df, annot=False, cmap="coolwarm", center=0, cbar=True, ax=ax3
+                )
+                ax3.set_title("Matriz de Correlación (Predictoras)")
+            except Exception as e:
+                self.logger.error(f"Error graficando matriz de correlación: {e}")
+                ax3.text(
+                    0.5,
+                    0.5,
+                    "No se pudo graficar\nmatriz de correlación",
+                    ha="center",
+                    va="center",
+                )
+        else:
+            ax3.text(
+                0.5,
+                0.5,
+                "No hay matriz de correlación disponible",
+                ha="center",
+                va="center",
+            )
+
         plt.tight_layout()
 
+        # Guardar si se especifica ruta
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches="tight")
-            print(f"Gráfica guardada en: {save_path}")
+            try:
+                plt.savefig(save_path, dpi=300, bbox_inches="tight")
+                self.logger.info(f"Gráfica guardada en: {save_path}")
+            except Exception as e:
+                self.logger.error(f"Error guardando la gráfica: {e}")
 
         plt.show()
 
@@ -387,6 +457,12 @@ class XGBoostModel:
         Logging:
             - Logs confirmation when feature importance has been extracted.
         """
+        if self.model is None:
+            self.logger.error(
+                "Model must be trained before extracting feature importance."
+            )
+            return pd.DataFrame()
+
         importance = self.model.feature_importances_
         feature_importance = pd.DataFrame(
             {"feature": self.feature_names, "importance": importance}
@@ -407,6 +483,10 @@ class XGBoostModel:
             - Logs the importance of numeric and categorical variables separately.
         """
         importance_df = self.get_feature_importance()
+        if importance_df.empty:
+            self.logger.error("No feature importance data available.")
+            return
+
         self.logger.info(
             "\n===== Importancia de Características (XGBoost Nativo) ====="
         )
@@ -426,6 +506,11 @@ class XGBoostModel:
         self.logger.info("\n Variables Categóricas (Procesamiento Nativo):")
         for _, row in categorical_features.iterrows():
             self.logger.info(f"  {row['feature']}: {row['importance']:.4f}")
+
+        self.logger.info(f"\nResumen:")
+        self.logger.info(f"  Total features: {len(importance_df)}")
+        self.logger.info(f"  Features numéricas: {len(numeric_features)}")
+        self.logger.info(f"  Features categóricas: {len(categorical_features)}")
 
     def save_model(self, path: str = "xgboost_native_categorical.json"):
         """
@@ -546,13 +631,12 @@ class XGBoostModel:
             ]
         ).sort("cycle_group")
 
-    def explain_model(self, max_display: int = 15):
+    def explain_model(self, max_display: int = 15, plots: bool = False):
         """
         Generate SHAP-based explanations for the trained XGBoost model.
-
         This method uses SHAP (SHapley Additive exPlanations) to interpret the trained
         XGBoost model. SHAP values provide insights into how much each feature contributes
-        to the model’s predictions, both on average and per individual prediction.
+        to the model's predictions, both on average and per individual prediction.
 
         The method performs the following steps:
             1. Verifies that the model and test data exist.
@@ -561,63 +645,94 @@ class XGBoostModel:
             4. Aggregates and ranks features based on their mean absolute contribution.
             5. Logs the top contributing features (limited by `max_display`).
             6. Evaluates the additivity property of SHAP explanations by comparing
-               the reconstructed prediction (SHAP sum + expected value) against
-               the model’s raw predictions.
+            the reconstructed prediction (SHAP sum + expected value) against
+            the model's raw predictions.
             7. Logs the relative mean and maximum additivity errors as a measure
-               of explanation accuracy.
+            of explanation accuracy.
 
         Args:
             max_display (int, optional): Maximum number of top features to display.
-                                         Defaults to 15.
+                                        Defaults to 15.
 
         Returns:
-            None. The function logs detailed SHAP explanation results.
+            tuple: (shap_values_explanation, importance_df) for further analysis
         """
         if not hasattr(self, "model") or self.model is None:
             self.logger.error("❌ Error: El modelo no ha sido entrenado todavía.")
-            return
 
         if not hasattr(self, "X_test") or self.X_test is None:
             self.logger.error(
                 "❌ Error: No existen datos de test. Ejecute train() primero."
             )
-            return
 
         self.logger.info("\n Calculando explicaciones con SHAP...")
+        try:
+            # Crear SHAP explainer
+            explainer = shap.TreeExplainer(
+                self.model, feature_perturbation="interventional"
+            )
 
-        # Crear shap explainer
-        explainer = shap.TreeExplainer(
-            self.model, feature_perturbation="interventional"
-        )
+            # Compute SHAP values for test data
+            shap_values = explainer.shap_values(self.X_test, check_additivity=False)
 
-        # compute shap values for test data
-        shap_values = explainer.shap_values(self.X_test, check_additivity=False)
+            # Wrap SHAP results into an Explanation object (for compatibility with plots)
+            shap_values_explanation = shap.Explanation(
+                values=shap_values,
+                base_values=explainer.expected_value,
+                data=self.X_test,
+                feature_names=self.feature_names,
+            )
 
-        # Wrap SHAP results into an Explanation object (for compatibility with plots)
-        shap_values_explanation = shap.Explanation(
-            values=shap_values,
-            base_values=explainer.expected_value,
-            data=self.X_test,
-            feature_names=self.feature_names,
-        )
+            # Calculate average absolute importance per feature
+            shap_importance = np.abs(shap_values).mean(axis=0)
+            importance_df = pd.DataFrame(
+                {"feature": self.feature_names, "mean_abs_shap": shap_importance}
+            ).sort_values("mean_abs_shap", ascending=False)
 
-        # Calculate average absolute importance per feature
-        shap_importance = np.abs(shap_values).mean(axis=0)
+            self.logger.info("\n===== Aporte de variables según SHAP =====")
+            for _, row in importance_df.head(
+                max_display
+            ).iterrows():  # Corregido: quitado asteriscos
+                self.logger.info(f"  {row['feature']}: {row['mean_abs_shap']:.4f}")
 
-        importance_df = pd.DataFrame(
-            {"feature": self.feature_names, "mean_abs_shap": shap_importance}
-        ).sort_values("mean_abs_shap", ascending=False)
+            # Validate SHAP additivity property (prediction = sum(shap) + expected_value)
+            shap_sum = shap_values.sum(axis=1) + explainer.expected_value
+            preds = self.model.predict(self.X_test)
+            additivity_error = np.abs(shap_sum - preds) / (np.abs(preds) + 1e-8)
 
-        self.logger.info("\n===== Aporte de variables según SHAP =====")
-        for _, row in importance_df.head(max_display).iterrows():
-            self.logger.info(f"  {row['feature']}: {row['mean_abs_shap']:.4f}")
+            self.logger.info(
+                f"📊 Media error relativo de aditividad: {additivity_error.mean():.6f}"
+            )  # Corregido: formato f-string
+            self.logger.info(
+                f"📈 Máximo error relativo: {additivity_error.max():.6f}"
+            )  # Corregido: formato f-string
 
-        # validate shap additivity property (prediction = sum(shap) + expected_value)
-        shap_sum = shap_values.sum(axis=1) + explainer.expected_value
-        preds = self.model.predict(self.X_test)
-        additivity_error = np.abs(shap_sum - preds) / (np.abs(preds) + 1e-8)
-        self.logger.info("Media error relativo de aditividad:", additivity_error.mean())
-        self.logger.info("Máximo error relativo:", additivity_error.max())
+            # Store SHAP values for later use
+            self.shap_values = shap_values
+            self.shap_explainer = explainer
+            self.shap_explanation = shap_values_explanation
+
+            self.logger.info("✅ Explicaciones SHAP calculadas correctamente.")
+
+            if plots:
+                # create combined plots
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 14))
+                manager = plt.get_current_fig_manager()
+
+                plt.sca(ax1)
+                shap.summary_plot(
+                    shap_values_explanation.values,
+                    self.X_test,
+                    feature_names=self.feature_names,
+                    show=False,
+                )
+                shap.plots.bar(shap_values_explanation, ax=ax2, show=False)
+                plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0.1)
+                plt.tight_layout(pad=0.5)
+                plt.show()
+
+        except Exception as e:
+            self.logger.error(f"❌ Error calculando explicaciones SHAP: {str(e)}")
         # Opcional: gráfico resumen
         # shap.summary_plot(shap_values, self.X_test, feature_names=self.feature_names)
         # shap.plots.bar(shap_values_explanation)
@@ -701,10 +816,11 @@ if __name__ == "__main__":
         "Distance",
         "CycleDurationSeconds",
         "StageSequence",
+        "AvgTimeEfficiencyPercentage",
     ]
 
     # ✨ Todas las categóricas en una sola lista - XGBoost decide el mejor encoding
-    categorical_vars = ["Destination"]
+    categorical_vars = ["Destination", "DestinationType", "Shovel"]
 
     # Crear modelo con soporte nativo
     model = XGBoostModel(
@@ -723,16 +839,15 @@ if __name__ == "__main__":
 
         # almacenar el modelo en un csv
         cycles_with_predictions = model.get_predictions()
-        print(cycles_with_predictions.head())
 
         # Para guardar en CSV
-        # cycles_with_predictions.write_csv("xgboost_predictions.csv")
+        cycles_with_predictions.write_csv("xgboost_predictions.csv")
 
-        # model.print_feature_importance()
-        # model.explain_model()
+        model.print_feature_importance()
+        model.explain_model(plots=False)
         # model.predict_manual()
 
-        # model.plot_predictions("xgboost_predictions.png")
+        model.plot_predictions("xgboost_predictions.png", resultados)
         # model.save_model()
 
     except Exception as e:

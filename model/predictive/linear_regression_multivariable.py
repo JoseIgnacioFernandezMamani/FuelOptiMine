@@ -63,6 +63,24 @@ class LinearRegressionModel:
         # self.logger
         self.logger = get_logger("LinearRegression", "lrm.log", console=False)
 
+    def get_model_stage_4(self):
+        if self.model_stage_4 is None:
+            self.logger.error("El modelo stage_4 no ha sido entrenado aún.")
+            raise ValueError("El modelo stage_4 no ha sido entrenado aún.")
+        return self.model_stage_4
+
+    def get_model_stage_8(self):
+        if self.model_stage_8 is None:
+            self.logger.error("El modelo stage_8 no ha sido entrenado aún.")
+            raise ValueError("El modelo stage_8 no ha sido entrenado aún.")
+        return self.model_stage_8
+
+    def get_cycle_data(self) -> pl.DataFrame:
+        if self.cycles_data.is_empty():
+            self.logger.error("Los datos de ciclos no están disponibles.")
+            raise ValueError("Los datos de ciclos no están disponibles.")
+        return self.cycles_data
+
     def load_data(self):
         """
         Load data from CSV file (hardcoding for now).
@@ -196,15 +214,39 @@ class LinearRegressionModel:
         )
 
         # filtros básicos
-        result = result.filter(
-            (pl.col("Destination").str.strip_chars().str.len_bytes() > 2)
-            & (pl.col("Distance") > 0)
-            & (pl.col("TotalMeasuredTonnage") >= 0)
-            & (pl.col("CycleDurationSeconds") > 120)
-            & (pl.col("CycleDurationSeconds") < 21600)
-            & (pl.col("FuelConsumed") >= 0.1)
-            & (pl.col("FuelConsumed") <= 210)
-            & (pl.col("StageSequence").is_not_null())
+        result = result.with_columns(
+            [
+                # Destination: si longitud <= 2 → "UNKNOWN"
+                pl.when(pl.col("Destination").str.strip_chars().str.len_bytes() > 2)
+                .then(pl.col("Destination"))
+                .otherwise(pl.lit("UNKNOWN"))
+                .alias("Destination"),
+                # Distance: si <= 0 → 0
+                pl.when(pl.col("Distance") > 0)
+                .then(pl.col("Distance"))
+                .otherwise(0)
+                .alias("Distance"),
+                # TotalMeasuredTonnage: si < 0 → 0
+                pl.when(pl.col("TotalMeasuredTonnage") >= 0)
+                .then(pl.col("TotalMeasuredTonnage"))
+                .otherwise(0)
+                .alias("TotalMeasuredTonnage"),
+                # CycleDurationSeconds: si <120 o >21600 → 0 (o valor que prefieras)
+                pl.when(
+                    (pl.col("CycleDurationSeconds") >= 120)
+                    & (pl.col("CycleDurationSeconds") <= 21600)
+                )
+                .then(pl.col("CycleDurationSeconds"))
+                .otherwise(0)
+                .alias("CycleDurationSeconds"),
+                # FuelConsumed: si <1 o >210 → 0 (o valor que prefieras)
+                pl.when((pl.col("FuelConsumed") >= 1) & (pl.col("FuelConsumed") <= 210))
+                .then(pl.col("FuelConsumed"))
+                .otherwise(0)
+                .alias("FuelConsumed"),
+                # StageSequence: si es null → -1 (valor por defecto)
+                pl.col("StageSequence").fill_null(-1).alias("StageSequence"),
+            ]
         )
 
         self.cycles_data = result
@@ -736,10 +778,10 @@ class LinearRegressionModel:
         return self.cycles_data
 
 
-""" if __name__ == "__main__":
+""" 
+if __name__ == "__main__":
     model = LinearRegressionModel()
     results = model.train_models()
     predictions_df = model.get_predictions()
     predictions_df.write_csv("predicted_cycles.csv")
-    self.logger.info("Predictions saved to predicted_cycles.csv")
  """
