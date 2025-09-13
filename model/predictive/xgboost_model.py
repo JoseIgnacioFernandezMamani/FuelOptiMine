@@ -1,4 +1,3 @@
-from PIL.Image import logger
 import polars as pl
 import numpy as np
 import pandas as pd
@@ -19,16 +18,7 @@ import seaborn as sns
 import shap
 import logging
 from .linear_regression_multivariable import LinearRegressionModel
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("xgb.log", mode="a"),  # guarda en archivo
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+from model.utils.model_utils import analyze_multicollinearity, log_results, get_logger
 
 
 class XGBoostModel:
@@ -64,7 +54,7 @@ class XGBoostModel:
             min_child_weight=3,
             subsample=0.8,
             colsample_bytree=0.8,
-            tree_method="gpu_hist",  # Requerido para categorical support
+            tree_method="hist",  # Requerido para categorical support
             device="cuda",
             random_state=42,
             eval_metric="mae",
@@ -78,7 +68,6 @@ class XGBoostModel:
         )
 
         # Results and testing data
-        self.results = {}
         self.y_test = None
         self.y_pred = None
         self.feature_names = []
@@ -88,6 +77,9 @@ class XGBoostModel:
 
         # store test data
         self.X_test = None
+
+        # self.logger
+        self.logger = get_logger("XGBoost", "xgb.log", console=True)
 
     def load_data(self, csv_path: str = "unified_data_T-210.csv"):
         """
@@ -101,7 +93,7 @@ class XGBoostModel:
         """
         Process data to identify cycles and calculate fuel consumption metrics.
         """
-        logger.info("Transformando datos de cycle")
+        self.logger.info("Transformando datos de cycle")
 
         df = self.df
         result = df.with_columns(
@@ -144,13 +136,13 @@ class XGBoostModel:
             )
 
         self.cycles_data = result
-        logger.info(f"Datos procesados: {len(result)} ciclos válidos.")
+        self.logger.info(f"Datos procesados: {len(result)} ciclos válidos.")
 
     def prepare_data(self):
         """
         Prepare data for XGBoost training using native categorical support.
         """
-        logger.info("Preparing data for training...")
+        self.logger.info("Preparing data for training...")
 
         # convert to pandas
         df = self.cycles_data.to_pandas().copy()
@@ -179,12 +171,12 @@ class XGBoostModel:
         # save feature names
         self.feature_names = list(X_final.columns)
 
-        logger.info(f"Data after cleaning: {len(X_clean)} records.")
-        logger.info(f"Numeric features: {self.numeric_predictor_vars}")
-        logger.info(f"Categorical features: {self.categorical_vars}")
-        logger.info("Final dtypes:")
+        self.logger.info(f"Data after cleaning: {len(X_clean)} records.")
+        self.logger.info(f"Numeric features: {self.numeric_predictor_vars}")
+        self.logger.info(f"Categorical features: {self.categorical_vars}")
+        self.logger.info("Final dtypes:")
         for col in X_final.columns:
-            logger.info(f"  {col}: {X_final[col].dtype}")
+            self.logger.info(f"  {col}: {X_final[col].dtype}")
 
         return train_test_split(X_clean, y_clean, test_size=0.2, random_state=42)
 
@@ -218,7 +210,7 @@ class XGBoostModel:
         # Save original test indices for traceability
         self.test_indices_original = X_test.index
 
-        logger.info(f"Entrenando con {len(X_train)} records...")
+        self.logger.info(f"Entrenando con {len(X_train)} records...")
 
         # train model and evaluate simultaneously
         self.model.fit(
@@ -228,10 +220,10 @@ class XGBoostModel:
             verbose=50,
         )
 
-        logger.info(f"Mejor iteración: {self.model.best_iteration}")
+        self.logger.info(f"Mejor iteración: {self.model.best_iteration}")
 
         # Mostrar información sobre cómo XGBoost procesó las categóricas
-        logger.info(
+        self.logger.info(
             f"Tipos de features detectados por XGBoost: {self.model.get_booster().feature_types}"
         )
 
@@ -258,8 +250,7 @@ class XGBoostModel:
         # MAPE safe calculation to avoid division by zero
         mape_safe = np.mean(np.abs((y_test - y_pred) / np.maximum(y_test, 0.1))) * 100
 
-        # store evaluation metrics
-        self.results = {
+        metrics = {
             "R2": r2_score(y_test, y_pred),
             "MAE": mean_absolute_error(y_test, y_pred),
             "RMSE": np.sqrt(mean_squared_error(y_test, y_pred)),
@@ -269,10 +260,26 @@ class XGBoostModel:
             "ExplainedVar": explained_variance_score(y_test, y_pred),
         }
 
-        logger.info("Training completed. Evaluation metrics calculated successfully.")
-        return self.results
+        # store evaluation metrics
+        results = {
+            "model": str(type(self.model).__name__),
+            "isolation_forest": str(type(self.iso_forest).__name__),
+            "samples": {
+                "train": len(X_train),
+                "test": len(X_test),
+            },
+            "metrics": metrics,
+            "multicollinearity": analyze_multicollinearity(
+                self.cycles_data, self.numeric_predictor_vars
+            ),
+        }
+        log_results(self.numeric_predictor_vars, "all", results, self.logger)
+        self.logger.info(
+            "Training completed. Evaluation metrics calculated successfully."
+        )
+        return results
 
-    def plot_predictions(self, save_path: str = None):
+    def plot_predictions(self, save_path: str, results: dict):
         """
         Generate visual plots comparing model predictions against actual values.
 
@@ -291,7 +298,7 @@ class XGBoostModel:
             - Logs confirmation if plots are saved to disk.
         """
         if self.y_test is None or self.y_pred is None:
-            logger.error("Model must be trained before plotting predictions.")
+            self.logger.error("Model must be trained before plotting predictions.")
             return
 
         plt.style.use("default")
@@ -346,8 +353,8 @@ class XGBoostModel:
         ax2.legend()
         ax2.grid(True, alpha=0.3)
 
-        r2 = self.results["R2"]
-        rmse = self.results["RMSE"]
+        r2 = results["R2"]
+        rmse = results["RMSE"]
         ax2.text(
             0.05,
             0.95,
@@ -385,7 +392,7 @@ class XGBoostModel:
             {"feature": self.feature_names, "importance": importance}
         ).sort_values("importance", ascending=False)
 
-        logger.info("Feature importance extracted successfully.")
+        self.logger.info("Feature importance extracted successfully.")
 
         return feature_importance
 
@@ -400,7 +407,9 @@ class XGBoostModel:
             - Logs the importance of numeric and categorical variables separately.
         """
         importance_df = self.get_feature_importance()
-        logger.info("\n===== Importancia de Características (XGBoost Nativo) =====")
+        self.logger.info(
+            "\n===== Importancia de Características (XGBoost Nativo) ====="
+        )
 
         # split by type
         numeric_features = importance_df[
@@ -410,13 +419,13 @@ class XGBoostModel:
             importance_df["feature"].isin(self.categorical_vars)
         ]
 
-        logger.info("\n Variables Numéricas:")
+        self.logger.info("\n Variables Numéricas:")
         for _, row in numeric_features.iterrows():
-            logger.info(f"  {row['feature']}: {row['importance']:.4f}")
+            self.logger.info(f"  {row['feature']}: {row['importance']:.4f}")
 
-        logger.info("\n Variables Categóricas (Procesamiento Nativo):")
+        self.logger.info("\n Variables Categóricas (Procesamiento Nativo):")
         for _, row in categorical_features.iterrows():
-            logger.info(f"  {row['feature']}: {row['importance']:.4f}")
+            self.logger.info(f"  {row['feature']}: {row['importance']:.4f}")
 
     def save_model(self, path: str = "xgboost_native_categorical.json"):
         """
@@ -432,8 +441,8 @@ class XGBoostModel:
             - Logs confirmation of model saving and reminders about JSON usage.
         """
         self.model.get_booster().save_model(path)
-        logger.info(f" Modelo guardado en: {path}")
-        logger.info(
+        self.logger.info(f" Modelo guardado en: {path}")
+        self.logger.info(
             " IMPORTANTE: Usar formato JSON para preservar información categórica"
         )
 
@@ -470,15 +479,11 @@ class XGBoostModel:
         df_all = self.cycles_data.to_pandas()
 
         # Prepare numeric and categorical features consistently with training
-        X_numeric = df_all[self.numeric_predictor_vars]
-        X_categorical = df_all[self.categorical_vars]
+        X_all = df_all[self.numeric_predictor_vars + self.categorical_vars].copy()
 
         # Convert categorical variables to 'category' dtype (same as in training)
         for cat_col in self.categorical_vars:
-            X_categorical[cat_col] = X_categorical[cat_col].astype("category")
-
-        # Combine numeric and categorical features
-        X_all = pd.concat([X_numeric, X_categorical], axis=1)
+            X_all[cat_col] = X_all[cat_col].astype("category")
 
         # run predictions for all available data
         y_pred_all = self.model.predict(X_all)
@@ -488,7 +493,8 @@ class XGBoostModel:
         residuals_all = y_true_all - y_pred_all
 
         # apply outlier detection on numeric features
-        outlier_predictions = self.iso_forest.predict(X_numeric)
+        X_numeric_for_outliers = df_all[self.numeric_predictor_vars]
+        outlier_predictions = self.iso_forest.predict(X_numeric_for_outliers)
 
         is_inlier = outlier_predictions == 1
         is_outlier = outlier_predictions == -1
@@ -501,9 +507,11 @@ class XGBoostModel:
                 pl.Series("is_inlier", is_inlier),
                 pl.Series("is_outlier", is_outlier),
             ]
+        ).with_columns(
+            pl.when(pl.col("StageSequence")).then(8).otherwise(4).alias("StageSequence")
         )
 
-        logger.info("Predictions, residuals, and outlier flags added to dataset.")
+        self.logger.info("Predictions, residuals, and outlier flags added to dataset.")
         return result.select(
             [
                 "cycle_group",
@@ -536,7 +544,7 @@ class XGBoostModel:
                 "PredictedFuelXGBoost",
                 "residual",
             ]
-        )
+        ).sort("cycle_group")
 
     def explain_model(self, max_display: int = 15):
         """
@@ -566,14 +574,16 @@ class XGBoostModel:
             None. The function logs detailed SHAP explanation results.
         """
         if not hasattr(self, "model") or self.model is None:
-            logger.error("❌ Error: El modelo no ha sido entrenado todavía.")
+            self.logger.error("❌ Error: El modelo no ha sido entrenado todavía.")
             return
 
         if not hasattr(self, "X_test") or self.X_test is None:
-            logger.error("❌ Error: No existen datos de test. Ejecute train() primero.")
+            self.logger.error(
+                "❌ Error: No existen datos de test. Ejecute train() primero."
+            )
             return
 
-        logger.info("\n Calculando explicaciones con SHAP...")
+        self.logger.info("\n Calculando explicaciones con SHAP...")
 
         # Crear shap explainer
         explainer = shap.TreeExplainer(
@@ -598,16 +608,16 @@ class XGBoostModel:
             {"feature": self.feature_names, "mean_abs_shap": shap_importance}
         ).sort_values("mean_abs_shap", ascending=False)
 
-        logger.info("\n===== Aporte de variables según SHAP =====")
+        self.logger.info("\n===== Aporte de variables según SHAP =====")
         for _, row in importance_df.head(max_display).iterrows():
-            logger.info(f"  {row['feature']}: {row['mean_abs_shap']:.4f}")
+            self.logger.info(f"  {row['feature']}: {row['mean_abs_shap']:.4f}")
 
         # validate shap additivity property (prediction = sum(shap) + expected_value)
         shap_sum = shap_values.sum(axis=1) + explainer.expected_value
         preds = self.model.predict(self.X_test)
         additivity_error = np.abs(shap_sum - preds) / (np.abs(preds) + 1e-8)
-        logger.info("Media error relativo de aditividad:", additivity_error.mean())
-        logger.info("Máximo error relativo:", additivity_error.max())
+        self.logger.info("Media error relativo de aditividad:", additivity_error.mean())
+        self.logger.info("Máximo error relativo:", additivity_error.max())
         # Opcional: gráfico resumen
         # shap.summary_plot(shap_values, self.X_test, feature_names=self.feature_names)
         # shap.plots.bar(shap_values_explanation)
@@ -635,12 +645,12 @@ class XGBoostModel:
             float: Predicted fuel consumption value for the provided inputs.
         """
         if not hasattr(self, "model") or self.model is None:
-            logger.error(
+            self.logger.error(
                 "❌ Error: El modelo no está entrenado. Ejecute train() primero."
             )
             return
 
-        logger.info("\n Ingrese los valores para la predicción:")
+        self.logger.info("\n Ingrese los valores para la predicción:")
 
         # collect numeric feature inputs
         input_data = {}
@@ -675,48 +685,10 @@ class XGBoostModel:
         # run predictions
         prediction = self.model.predict(X_final)
 
-        logger.info(
+        self.logger.info(
             f"\n Predicción de consumo de combustible: {prediction[0]:.2f} litros"
         )
         return prediction[0]
-
-    def analyze_multicollinearity(self) -> dict:
-        """
-        Analyze multicollinearity among predictor variables using:
-            - Pearson correlation matrix
-            - Variance Inflation Factor (VIF)
-        Applied directly on self.cycles_data (unscaled data).
-        """
-        df = self.cycles_data[self.predictor_vars].drop_nulls().drop_nans().to_pandas()
-
-        # Correlation matrix
-        corr_matrix = df.corr(method="pearson").to_dict()
-
-        # VIF
-        vif_data = pd.DataFrame()
-        vif_data["Variable"] = df.columns
-        vif_data = {
-            df.columns[i]: variance_inflation_factor(df.values, i)
-            for i in range(df.shape[1])
-        }
-
-        return {"correlation_matrix": corr_matrix, "vif": vif_data}
-
-    def log_results(self, stage: str, results: dict):
-        """
-        Logs all training results in a structured way.
-        """
-        log_entry = {
-            "timestamp": datetime.datetime.now().isoformat(),
-            "stage": stage,
-            "predictors": self.predictor_vars,
-            "results": results,
-        }
-
-        # save as json
-        logger.info(
-            "Training summary:\n%s", json.dumps(log_entry, indent=4, default=str)
-        )
 
 
 if __name__ == "__main__":
@@ -754,12 +726,7 @@ if __name__ == "__main__":
         print(cycles_with_predictions.head())
 
         # Para guardar en CSV
-        cycles_with_predictions.write_csv("xgboost_predictions.csv")
-
-        # Resultados
-        print("\n===== Resultados XGBoost Native Categorical =====")
-        for k, v in resultados.items():
-            print(f"{k}: {v:.4f}")
+        # cycles_with_predictions.write_csv("xgboost_predictions.csv")
 
         # model.print_feature_importance()
         # model.explain_model()

@@ -1,16 +1,15 @@
 import logging
 import pandas as pd
+import polars as pl
 import datetime
 import json
 from statsmodels.stats.outliers_influence import variance_inflation_factor
-
-logger = logging.getLogger(__name__)
+import sys
 
 
 def analyze_multicollinearity(
-    self,
-    cycles_data,
-    predictor_vars,
+    cycles_data: pl.DataFrame,
+    predictor_vars: list[str],
 ) -> dict:
     """
     Analyze multicollinearity among predictor variables using:
@@ -18,7 +17,12 @@ def analyze_multicollinearity(
         - Variance Inflation Factor (VIF)
     Applied directly on self.cycles_data (unscaled data).
     """
-    df = cycles_data[predictor_vars].drop_nulls().drop_nans().to_pandas()
+    aux = predictor_vars.copy()
+    # exception xgboost model
+    if "StageSequence" in aux:
+        aux.remove("StageSequence")
+
+    df = cycles_data[aux].drop_nulls().drop_nans().to_pandas()
 
     # Correlation matrix
     corr_matrix = df.corr(method="pearson").to_dict()
@@ -34,16 +38,54 @@ def analyze_multicollinearity(
     return {"correlation_matrix": corr_matrix, "vif": vif_data}
 
 
-def log_results(self, stage: str, results: dict):
+def log_results(predictor_vars: list[str], stage: str, results: dict, logger):
     """
     Logs all training results in a structured way.
     """
     log_entry = {
         "timestamp": datetime.datetime.now().isoformat(),
         "stage": stage,
-        "predictors": self.predictor_vars,
+        "predictors": predictor_vars,
         "results": results,
     }
 
     # save as json
     logger.info("Training summary:\n%s", json.dumps(log_entry, indent=4, default=str))
+
+
+def get_logger(name: str, log_file: str, console: bool = True):
+    """
+    Crear logger específico por clase con configuración consistente
+
+    Args:
+        name: Nombre del logger (ej: "LinearRegression", "XGBoost")
+        log_file: Archivo de log (ej: "lrm.log", "xgb.log")
+        console: Si mostrar en consola o no
+    """
+    logger = logging.getLogger(name)
+
+    # Solo configurar si no tiene handlers (evita duplicados)
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+
+        # Handler para archivo
+        file_handler = logging.FileHandler(log_file, mode="a")
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        )
+        logger.addHandler(file_handler)
+
+        # Handler para consola (opcional)
+        if console:
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+                )
+            )
+            logger.addHandler(console_handler)
+
+        # Evitar propagación al root logger
+        logger.propagate = False
+
+    return logger

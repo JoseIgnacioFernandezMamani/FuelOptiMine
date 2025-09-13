@@ -20,15 +20,7 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 import logging
 import datetime
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("lrm.log", mode="a"),  # guarda en archivo
-        logging.StreamHandler(),  # también imprime en consola
-    ],
-)
-logger = logging.getLogger(__name__)
+from model.utils.model_utils import analyze_multicollinearity, log_results, get_logger
 
 
 class LinearRegressionModel:
@@ -63,16 +55,19 @@ class LinearRegressionModel:
             contamination=0.05, random_state=42
         )
 
-        # Resultados
+        # results
         self.results_stage_4: dict = {}
         self.results_stage_8: dict = {}
         self.df: pl.DataFrame = pl.DataFrame()
+
+        # self.logger
+        self.logger = get_logger("LinearRegression", "lrm.log", console=False)
 
     def load_data(self):
         """
         Load data from CSV file (hardcoding for now).
         """
-        logger.info("Cargando datos desde ...")
+        self.logger.info("Cargando datos desde ...")
         df = pl.read_csv("unified_data_T-210.csv", try_parse_dates=True)
         self.df = df.sort("SortTimestamp")
 
@@ -239,16 +234,18 @@ class LinearRegressionModel:
                 - y_train: Training target values (fuel consumption)
                 - y_test: Test target values (fuel consumption
         """
-        logger.info(f"Preparando datos para stage con {len(data)} muestras iniciales")
+        self.logger.info(
+            f"Preparando datos para stage con {len(data)} muestras iniciales"
+        )
 
         # select predictor variables and target
         X = data.select(self.predictor_vars).to_pandas()
         y = data.select("FuelConsumed").to_numpy().flatten()
 
-        logger.info(f"Variables predictoras: {self.predictor_vars}")
+        self.logger.info(f"Variables predictoras: {self.predictor_vars}")
 
         # delete outliers using IsolationForest
-        logger.info("Detectando outliers con Isolation Forest...")
+        self.logger.info("Detectando outliers con Isolation Forest...")
         outlier_predictions = iso_forest.fit_predict(X)
 
         # Create boolean mask for inliers (1 = inlier, -1 = outlier)
@@ -256,13 +253,15 @@ class LinearRegressionModel:
         n_outliers = np.sum(~inlier_mask)
         outlier_percentage = (n_outliers / len(X)) * 100
 
-        logger.info(f"Outliers detectados: {n_outliers} ({outlier_percentage:.2f}%)")
+        self.logger.info(
+            f"Outliers detectados: {n_outliers} ({outlier_percentage:.2f}%)"
+        )
 
         # filter to keep only inliers
         X_clean = X[inlier_mask]
         y_clean = y[inlier_mask]
 
-        logger.info(
+        self.logger.info(
             f"Datos después de remover outliers - X: {X_clean.shape}, y: {y_clean.shape}"
         )
 
@@ -286,7 +285,7 @@ class LinearRegressionModel:
             "contamination_used": iso_forest.contamination,
         }
 
-        logger.info(
+        self.logger.info(
             f"División final - Train: {len(X_train_scaled)}, Test: {len(X_test_scaled)}"
         )
 
@@ -364,7 +363,7 @@ class LinearRegressionModel:
         Returns:
             RANSACRegressor: Best performing RANSAC model fitted on training datCrear y retornar un modelo de regresión RANSAC optimizado.
         """
-        logger.info("Iniciando optimización de modelo RANSAC...")
+        self.logger.info("Iniciando optimización de modelo RANSAC...")
         n_samples, n_features = X_train.shape
 
         # Define multiple RANSAC configurations with different hyperparameters
@@ -404,7 +403,7 @@ class LinearRegressionModel:
         current_test = 0
 
         for config_idx, config in enumerate(configurations):
-            logger.info(
+            self.logger.info(
                 f"Probando configuración {config_idx + 1}/{len(configurations)}"
             )
 
@@ -479,34 +478,36 @@ class LinearRegressionModel:
                             best_optimization_metrics = current_metrics
                             last_logged_metrics = current_metrics.copy()
 
-                            logger.info("==== MEJORA ENCONTRADA ====")
-                            logger.info(
+                            self.logger.info("==== MEJORA ENCONTRADA ====")
+                            self.logger.info(
                                 f"Test {current_test}/{total_tests} - Nueva mejor configuración:"
                             )
-                            logger.info(f"R² Train: {current_metrics['r2_train']:.4f}")
-                            logger.info(
+                            self.logger.info(
+                                f"R² Train: {current_metrics['r2_train']:.4f}"
+                            )
+                            self.logger.info(
                                 f"R² Inliers: {current_metrics['r2_inliers']:.4f}"
                             )
-                            logger.info(
+                            self.logger.info(
                                 f"MAE Train: {current_metrics['mae_train']:.4f}"
                             )
-                            logger.info(
+                            self.logger.info(
                                 f"Inliers: {current_metrics['n_inliers']} ({current_metrics['inlier_ratio']:.4f})"
                             )
-                            logger.info(
+                            self.logger.info(
                                 f"Score Compuesto: {current_metrics['composite_score']:.4f}"
                             )
-                            logger.info(f"Trials: {current_metrics['n_trials']}")
+                            self.logger.info(f"Trials: {current_metrics['n_trials']}")
                 except Exception as e:
                     # Log errors for debugging but continue optimization
-                    logger.debug(
+                    self.logger.debug(
                         f"Error en configuración {config_idx}, seed {seed}: {str(e)}"
                     )
                     continue
 
         # Fallback to default RANSAC if optimization failed
         if best_ransac_model is None:
-            logger.info("Usando configuración RANSAC por defecto...")
+            self.logger.info("Usando configuración RANSAC por defecto...")
             best_ransac_model = linear_model.RANSACRegressor(
                 min_samples=max(n_features + 1, 10),
                 max_trials=500,
@@ -553,7 +554,7 @@ class LinearRegressionModel:
         stage_4_data = self.cycles_data.filter(pl.col("StageSequence") == 4)
         stage_8_data = self.cycles_data.filter(pl.col("StageSequence") == 8)
 
-        logger.info("Entrenando el modelo stage_4")
+        self.logger.info("Entrenando el modelo stage_4")
 
         # Prepare and scale Stage 4 data for training
         stage_4_scaled_data = self.prepare_data_for_stage(
@@ -570,7 +571,7 @@ class LinearRegressionModel:
         y_pred_train_4 = self.model_stage_4.predict(stage_4_scaled_data["X_train"])
         y_pred_test_4 = self.model_stage_4.predict(stage_4_scaled_data["X_test"])
 
-        logger.info("Entrenando el modelo stage_8")
+        self.logger.info("Entrenando el modelo stage_8")
 
         # Prepare and scale Stage 8 data for training
         stage_8_scaled_data = self.prepare_data_for_stage(
@@ -586,7 +587,7 @@ class LinearRegressionModel:
         y_pred_train_8 = self.model_stage_8.predict(stage_8_scaled_data["X_train"])
         y_pred_test_8 = self.model_stage_8.predict(stage_8_scaled_data["X_test"])
 
-        logger.info("Entrenamiento completado.")
+        self.logger.info("Entrenamiento completado.")
 
         # Compile comprehensive results dictionary with all training outcomes
         result = {
@@ -628,10 +629,12 @@ class LinearRegressionModel:
                 ),
                 "outlier_info": stage_8_scaled_data["outlier_info"],
             },
-            "multicollinearity": self.analyze_multicollinearity(),
+            "multicollinearity": analyze_multicollinearity(
+                self.cycles_data, self.predictor_vars
+            ),
         }
 
-        self.log_results(stage="all", results=result)
+        log_results(self.predictor_vars, "all", result, self.logger)
 
         return result
 
@@ -656,44 +659,6 @@ class LinearRegressionModel:
             "intercept": intercept_original,
             "coefficients": dict(zip(self.predictor_vars, betas_original)),
         }
-
-    def analyze_multicollinearity(self) -> dict:
-        """
-        Analyze multicollinearity among predictor variables using:
-            - Pearson correlation matrix
-            - Variance Inflation Factor (VIF)
-        Applied directly on self.cycles_data (unscaled data).
-        """
-        df = self.cycles_data[self.predictor_vars].drop_nulls().drop_nans().to_pandas()
-
-        # Correlation matrix
-        corr_matrix = df.corr(method="pearson").to_dict()
-
-        # VIF
-        vif_data = pd.DataFrame()
-        vif_data["Variable"] = df.columns
-        vif_data = {
-            df.columns[i]: variance_inflation_factor(df.values, i)
-            for i in range(df.shape[1])
-        }
-
-        return {"correlation_matrix": corr_matrix, "vif": vif_data}
-
-    def log_results(self, stage: str, results: dict):
-        """
-        Logs all training results in a structured way.
-        """
-        log_entry = {
-            "timestamp": datetime.datetime.now().isoformat(),
-            "stage": stage,
-            "predictors": self.predictor_vars,
-            "results": results,
-        }
-
-        # save as json
-        logger.info(
-            "Training summary:\n%s", json.dumps(log_entry, indent=4, default=str)
-        )
 
     def get_predictions(self) -> pl.DataFrame:
         """
@@ -721,7 +686,7 @@ class LinearRegressionModel:
         if self.scaler_stage_4 is None or self.scaler_stage_8 is None:
             raise ValueError("Scalers not available. Run train_models() first.")
 
-        logger.info("Generating predictions for Stage 4 and Stage 8...")
+        self.logger.info("Generating predictions for Stage 4 and Stage 8...")
 
         predictions = []
 
@@ -737,7 +702,7 @@ class LinearRegressionModel:
             )
             predictions.append(stage_4_pred)
 
-            logger.info(f"Generated {len(preds)} predictions for Stage 4")
+            self.logger.info(f"Generated {len(preds)} predictions for Stage 4")
 
         # Stage 8
         stage_8_data = self.cycles_data.filter(pl.col("StageSequence") == 8)
@@ -751,7 +716,7 @@ class LinearRegressionModel:
             )
             predictions.append(stage_8_pred)
 
-            logger.info(f"Generated {len(preds)} predictions for Stage 8")
+            self.logger.info(f"Generated {len(preds)} predictions for Stage 8")
 
         if not predictions:
             raise RuntimeError("No Stage 4 or Stage 8 data available for predictions.")
@@ -759,7 +724,7 @@ class LinearRegressionModel:
         # Concatenar y ordenar por TimeStampIni
         predictions_df = pl.concat(predictions).sort("TimeStampIni")
 
-        logger.info(f"Final predictions dataframe shape: {predictions_df.shape}")
+        self.logger.info(f"Final predictions dataframe shape: {predictions_df.shape}")
         return predictions_df
 
     def get_cycle_data(self) -> pl.DataFrame:
@@ -771,9 +736,10 @@ class LinearRegressionModel:
         return self.cycles_data
 
 
-if __name__ == "__main__":
+""" if __name__ == "__main__":
     model = LinearRegressionModel()
     results = model.train_models()
     predictions_df = model.get_predictions()
     predictions_df.write_csv("predicted_cycles.csv")
-    logger.info("Predictions saved to predicted_cycles.csv")
+    self.logger.info("Predictions saved to predicted_cycles.csv")
+ """
