@@ -7,7 +7,7 @@ import polars as pl
 
 def run_cycle_etl_pipeline():
     # Configuración de rutas y parámetros
-    truck_id = "T-211"
+    truck_id = "T-210"
     dataset_name = "train_data"
     data_type = "cycle"
 

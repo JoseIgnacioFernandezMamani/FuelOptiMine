@@ -1,77 +1,63 @@
 import polars as pl
-import pandas as pd
-import numpy as np
-import json
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LinearRegression, PoissonRegressor
-from sklearn import linear_model
-from sklearn.ensemble import IsolationForest
-from typing import Dict, List, Any
-from sklearn.metrics import (
-    r2_score,
-    mean_absolute_error,
-    mean_squared_error,
-    median_absolute_error,
-    explained_variance_score,
-    mean_absolute_percentage_error,
-)
-from sklearn.model_selection import train_test_split
-from statsmodels.stats.outliers_influence import variance_inflation_factor
 import logging
-import datetime
+from pathlib import Path
+from typing import Optional
+import json
 
-from model.utils.model_utils import analyze_multicollinearity, log_results, get_logger
 
-
-class LinearRegressionModel:
+class CycleDataProcessor:
     """
-    Clase simplificada para regresión lineal con dos modelos: Stage 4 y Stage 8
+    Procesador de datos de ciclos de camiones mineros.
+
+    Esta clase se encarga de cargar datos de sensores de camiones desde un archivo CSV,
+    transformarlos para identificar ciclos operacionales y calcular métricas de consumo
+    de combustible, guardando los resultados procesados en un archivo CSV de salida.
     """
 
-    def __init__(self):
-        self.cycles_data: pl.DataFrame = pl.DataFrame()
-        self.predictor_vars: list[str] = [
-            "Distance",
-            "CycleDurationSeconds",  # no incluyo tonage porque no aporta nada realmente a la prediccion.
-        ]
+    def __init__(
+        self,
+        input_file: str = "unified_data_T-210.csv",
+        output_file: str = "cycles_data_processed.csv",
+    ):
+        """
+        Inicializa el procesador de datos de ciclos.
 
-        # Escaladores para cada stage
-        self.scaler_stage_4: StandardScaler = StandardScaler()
-        self.scaler_stage_8: StandardScaler = StandardScaler()
+        Args:
+            input_file (str): Ruta al archivo CSV de entrada con datos de sensores
+            output_file (str): Ruta al archivo CSV de salida para datos procesados
+        """
+        self.input_file = input_file
+        self.output_file = output_file
+        self.df = None
+        self.cycles_data = None
 
-        # Modelos
-        self.model_stage_4 = LinearRegression()
-        self.model_stage_8 = LinearRegression()
-
-        # modelo de isolation forest para detección de outliers
-        self.iso_forest_stage_4: IsolationForest = IsolationForest(
-            contamination=0.5, random_state=42
+        # Configurar logging
+        logging.basicConfig(
+            level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
         )
-        self.iso_forest_stage_8: IsolationForest = IsolationForest(
-            contamination=0.5, random_state=42
-        )
-
-        # results
-        self.results_stage_4: dict = {}
-        self.results_stage_8: dict = {}
-
-        self.df: pl.DataFrame = pl.DataFrame()
-
-        # self.logger
-        self.logger = get_logger("LinearRegression", "lrm.log", console=False)
+        self.logger = logging.getLogger(__name__)
 
     def load_data(self):
         """
-        Load data from CSV file (hardcoding for now).
-        """
-        self.logger.info("Cargando datos desde ...")
-        df = pl.read_csv(
-            "unified_data_T-210.csv",
-            try_parse_dates=True,
-        )
+        Carga datos desde archivo CSV con manejo de valores nulos y errores.
 
-        self.df = df.sort("SortTimestamp")
-        self.logger.info(f"Datos cargados exitosamente: {len(self.df)} registros")
+        Procesa las columnas de fecha y timestamp, ordenando los datos por timestamp
+        para el procesamiento secuencial de ciclos.
+        """
+        self.logger.info(f"Cargando datos desde {self.input_file}...")
+
+        try:
+            df = pl.read_csv(
+                self.input_file,
+                try_parse_dates=True,
+            )
+
+            self.df = df.sort("SortTimestamp")
+            self.logger.info(f"Datos cargados exitosamente: {len(self.df)} registros")
+
+        except Exception as e:
+            self.logger.error(f"Error cargando datos: {str(e)}")
+            raise
 
     def transform_cycles_data(self):
         """
@@ -499,364 +485,117 @@ class LinearRegressionModel:
 
         return concat_df
 
-    def prepare_data_for_stage(
-        self,
-        data: pl.DataFrame,
-        scaler: StandardScaler,
-        iso_forest: IsolationForest,
-        test_size: float = 0.2,
-        random_state: int = 42,
-        predictor_vars: List[str] = ["Distance", "CycleDurationSeconds"],
-    ) -> Dict[str, Any]:
+    def save_to_csv(self, output_file: Optional[str] = None):
         """
-        This method prepares cycle data by extracting features,
-        splitting into train/test sets, and applying standardization scaling.
+        Guarda los datos de ciclos procesados en un archivo CSV.
 
         Args:
-            data (pl.DataFrame): Cycle data filtered for specific stage
-            scaler (StandardScaler): Sklearn scaler for feature normalization
-            test_size (float, optional): Proportion for test split. Defaults to 0.2.
-            random_state (int, optional): Random seed for reproducible splits. Defaults to 42.
-
-        Returns:
-            Dict[str, Any]: Dictionary containing:
-                - X_train: Scaled training features
-                - X_test: Scaled test features
-                - y_train: Training target values (fuel consumption)
-                - y_test: Test target values (fuel consumption
+            output_file (Optional[str]): Ruta del archivo de salida.
+                                       Si es None, usa self.output_file
         """
-        self.logger.info(
-            f"Preparando datos para stage con {len(data)} muestras iniciales"
-        )
-
-        # select predictor variables and target
-
-        X = data.select(predictor_vars).to_pandas()
-        y = data.select("FuelConsumed").to_numpy().flatten()
-
-        self.logger.info(f"Variables predictoras: {predictor_vars}")
-
-        # delete outliers using IsolationForest
-        self.logger.info("Detectando outliers con Isolation Forest...")
-        outlier_predictions = iso_forest.fit_predict(X)
-
-        # Create boolean mask for inliers (1 = inlier, -1 = outlier)
-        inlier_mask = outlier_predictions == 1
-        n_outliers = np.sum(~inlier_mask)
-        outlier_percentage = (n_outliers / len(X)) * 100
-
-        self.logger.info(
-            f"Outliers detectados: {n_outliers} ({outlier_percentage:.2f}%)"
-        )
-
-        # filter to keep only inliers
-        X_clean = X[inlier_mask]
-        y_clean = y[inlier_mask]
-
-        self.logger.info(
-            f"Datos después de remover outliers - X: {X_clean.shape}, y: {y_clean.shape}"
-        )
-
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_clean,
-            y_clean,
-            test_size=test_size,
-            random_state=random_state,
-            shuffle=True,
-        )
-
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-
-        # Prepare outlier information for logging
-        outlier_info = {
-            "n_outliers_detected": n_outliers,
-            "outlier_percentage": outlier_percentage,
-            "original_samples": len(X),
-            "clean_samples": len(X_clean),
-            "contamination_used": iso_forest.contamination,
-        }
-
-        self.logger.info(
-            f"División final - Train: {len(X_train_scaled)}, Test: {len(X_test_scaled)}"
-        )
-
-        return {
-            "X_train": X_train_scaled,
-            "X_test": X_test_scaled,
-            "y_train": y_train,
-            "y_test": y_test,
-            "outlier_info": outlier_info,
-        }
-
-    def calculate_metrics(self, y_true, y_pred) -> Dict[str, float]:
-        """
-        Calculate comprehensive regression performance metrics
-
-        Args:
-            y_true: True target values
-            y_pred: Predicted values
-
-        Returns:
-            Dict[str, float]: Dictionary containing performance metrics:
-                - r2: R-squared score
-                - mae: Mean Absolute Error
-                - rmse: Root Mean Square Error
-                - medae: Median Absolute Error
-                - explained_variance: Explained Variance Score
-                - mape: Mean Absolute Percentage Error
-                - rmsle: Root Mean Square Log Error
-        """
-        metrics = {}
-        y_true = np.asarray(y_true, dtype=np.float64)
-        y_pred = np.asarray(y_pred, dtype=np.float64)
-        finite_mask = np.isfinite(y_true) & np.isfinite(y_pred)
-        y_true, y_pred = y_true[finite_mask], y_pred[finite_mask]
-
-        if len(y_true) < 2:
-            return {
-                m: np.nan
-                for m in [
-                    "r2",
-                    "mae",
-                    "rmse",
-                    "medae",
-                    "explained_variance",
-                    "mape",
-                    "rmsle",
-                ]
-            }
-
-        metrics["r2"] = r2_score(y_true, y_pred)
-        metrics["mae"] = mean_absolute_error(y_true, y_pred)
-        metrics["rmse"] = np.sqrt(mean_squared_error(y_true, y_pred))
-        metrics["medae"] = median_absolute_error(y_true, y_pred)
-        metrics["explained_variance"] = explained_variance_score(y_true, y_pred)
-        metrics["mape"] = mean_absolute_percentage_error(y_true, y_pred)
-        y_true_pos, y_pred_pos = np.maximum(y_true, 1e-10), np.maximum(y_pred, 1e-10)
-        metrics["rmsle"] = np.sqrt(
-            mean_squared_error(np.log1p(y_true_pos), np.log1p(y_pred_pos))
-        )
-        return metrics
-
-    def train_models(
-        self, test_size: float = 0.2, random_state: int = 42
-    ) -> Dict[str, Any]:
-        """
-        Train both models without validation (Stage 4 and Stage 8)
-
-        This method performs end-to-end training of regression models for two different
-        manufacturing stages, including data preparation, model training, and evaluation.
-
-        Args:
-            test_size (float, optional): Proportion of dataset to include in the test split.
-                                    Defaults to 0.2 (20%).
-            random_state (int, optional): Random seed for reproducible train/test splits.
-                                        Defaults to 42.
-
-        Returns:
-            Dict[str, Any]: Comprehensive training results containing:
-                - stage_4: Dictionary with Stage 4 model results
-                - stage_8: Dictionary with Stage 8 model results
-                - multicollinearity: Multicollinearity analysis results
-
-                Each stage dictionary contains:
-                    - model: Trained RANSAC regression model
-                    - scaler: Data scaler used for normalization
-                    - samples: Train/test sample counts
-                    - train_metrics: Training performance metrics
-                    - test_metrics: Testing performance metrics
-                    - model_parameters: Inverse-scaled model parameters
-        """
-        # load and transform data
-        self.load_data()
-        self.transform_cycles_data()
-
-        # Separate data by stage for independent model training
-        stage_4_data = self.cycles_data.filter(pl.col("QualityData"))
-        stage_8_data = self.cycles_data.filter(pl.col("QualityData"))
-
-        self.logger.info("Entrenando el modelo stage_4")
-
-        # Prepare and scale Stage 4 data for training
-        stage_4_scaled_data = self.prepare_data_for_stage(
-            stage_4_data,
-            self.scaler_stage_4,
-            self.iso_forest_stage_4,
-            test_size,
-            random_state,
-            self.predictor_vars,
-        )
-        self.model_stage_4 = LinearRegression().fit(
-            stage_4_scaled_data["X_train"], stage_4_scaled_data["y_train"]
-        )
-
-        y_pred_train_4 = self.model_stage_4.predict(stage_4_scaled_data["X_train"])
-        y_pred_test_4 = self.model_stage_4.predict(stage_4_scaled_data["X_test"])
-
-        self.logger.info("Entrenando el modelo stage_8")
-
-        # Prepare and scale Stage 8 data for training
-        stage_8_scaled_data = self.prepare_data_for_stage(
-            stage_8_data,
-            self.scaler_stage_8,
-            self.iso_forest_stage_8,
-            test_size,
-            random_state,
-            self.predictor_vars,
-        )
-        self.model_stage_8 = LinearRegression().fit(
-            stage_8_scaled_data["X_train"], stage_8_scaled_data["y_train"]
-        )
-        y_pred_train_8 = self.model_stage_8.predict(stage_8_scaled_data["X_train"])
-        y_pred_test_8 = self.model_stage_8.predict(stage_8_scaled_data["X_test"])
-
-        self.logger.info("Entrenamiento completado.")
-
-        # Compile comprehensive results dictionary with all training outcomes
-        result = {
-            "stage_4": {
-                "model": self.model_stage_4,
-                "scaler": self.scaler_stage_4,
-                "isolation_forest": self.iso_forest_stage_4,
-                "samples": {
-                    "train": len(stage_4_scaled_data["y_train"]),
-                    "test": len(stage_4_scaled_data["y_test"]),
-                },
-                "train_metrics": self.calculate_metrics(
-                    stage_4_scaled_data["y_train"], y_pred_train_4
-                ),
-                "test_metrics": self.calculate_metrics(
-                    stage_4_scaled_data["y_test"], y_pred_test_4
-                ),
-                "model_parameters": self.inverse_scale(
-                    self.model_stage_4, self.scaler_stage_4
-                ),
-                "outlier_info": stage_4_scaled_data["outlier_info"],
-            },
-            "stage_8": {
-                "model": self.model_stage_8,
-                "scaler": self.scaler_stage_8,
-                "isolation_forest": self.iso_forest_stage_8,
-                "samples": {
-                    "train": len(stage_8_scaled_data["y_train"]),
-                    "test": len(stage_8_scaled_data["y_test"]),
-                },
-                "train_metrics": self.calculate_metrics(
-                    stage_8_scaled_data["y_train"], y_pred_train_8
-                ),
-                "test_metrics": self.calculate_metrics(
-                    stage_8_scaled_data["y_test"], y_pred_test_8
-                ),
-                "model_parameters": self.inverse_scale(
-                    self.model_stage_8, self.scaler_stage_8
-                ),
-                "outlier_info": stage_8_scaled_data["outlier_info"],
-            },
-        }
-
-        log_results(self.predictor_vars, "all", result, self.logger)
-
-        return result
-
-    def inverse_scale(self, model, scaler) -> Dict[str, Any]:
-        """
-        Extract model parameters in original units (undoing the scaling).
-        """
-        if not hasattr(model, "estimator_"):
-            return {"error": "Modelo base no encontrado en RANSAC."}
-
-        betas_scaled = model.estimator_.coef_
-        intercept_scaled = model.estimator_.intercept_
-
-        scale = scaler.scale_
-        mean = scaler.mean_
-
-        # Ajustar coeficientes a espacio original
-        betas_original = betas_scaled / scale
-        intercept_original = intercept_scaled - np.sum(betas_scaled * mean / scale)
-
-        return {
-            "intercept": intercept_original,
-            "coefficients": dict(zip(self.predictor_vars, betas_original)),
-        }
-
-    def get_predictions(self) -> pl.DataFrame:
-        """
-        Generate fuel consumption predictions for all cycle data
-
-        This method applies the trained RANSAC regression models to predict fuel consumption
-        for all cycles in the dataset. It maintains the original data structure and order
-        by processing each stage separately and then combining results ordered by timestamp.
-
-        Returns:
-            pl.DataFrame: Complete cycle data with added prediction column:
-                - All original columns preserved in their original order
-                - New column 'PredictedFuelConsumption' with model predictions
-                - Data ordered by TimeStampIni to maintain chronological sequence
-
-        Raises:
-            ValueError: If models haven't been trained yet or cycle data is not available
-            RuntimeError: If prediction fails due to data incompatibility
-        """
-
         if self.cycles_data is None:
-            raise ValueError("Cycle data not available. Run train_models() first.")
-        if self.model_stage_4 is None or self.model_stage_8 is None:
-            raise ValueError("Models not trained. Run train_models() first.")
-
-        self.logger.info("Generating predictions for Stage 4 and Stage 8...")
-
-        predictions = []
-
-        # Stage 4
-        stage_4_data = self.cycles_data.filter(pl.col("StageSequence") == 4)
-        if len(stage_4_data) > 0:
-            features = stage_4_data.select(self.predictor_vars).to_pandas()
-            scaled = self.scaler_stage_4.transform(features)
-            preds = self.model_stage_4.predict(scaled)
-
-            stage_4_pred = stage_4_data.with_columns(
-                [
-                    pl.Series("PredictedFuelConsumption", preds),
-                    pl.lit("stage_4").alias("ModelUsed"),
-                ]
+            raise ValueError(
+                "No hay datos procesados para guardar. Ejecute transform_cycles_data() primero."
             )
 
-            predictions.append(stage_4_pred)
+        output_path = output_file or self.output_file
 
-            self.logger.info(f"Generated {len(preds)} predictions for Stage 4")
+        try:
+            self.cycles_data.write_csv(output_path)
+            self.logger.info(f"Datos guardados exitosamente en: {output_path}")
+            self.logger.info(f"Registros guardados: {len(self.cycles_data)}")
+        except Exception as e:
+            self.logger.error(f"Error guardando datos: {str(e)}")
+            raise
 
-        # Stage 8
-        stage_8_data = self.cycles_data.filter(pl.col("StageSequence") == 8)
-        if len(stage_8_data) > 0:
-            features = stage_8_data.select(self.predictor_vars).to_pandas()
-            scaled = self.scaler_stage_8.transform(features)
-            preds = self.model_stage_8.predict(scaled)
+    def process_all(self, output_file: Optional[str] = None) -> pl.DataFrame:
+        """
+        Ejecuta todo el pipeline de procesamiento de datos.
 
-            stage_8_pred = stage_8_data.with_columns(
-                [
-                    pl.Series("PredictedFuelConsumption", preds),
-                    pl.lit("stage_8").alias("ModelUsed"),
-                ]
+        Carga datos, los transforma y guarda el resultado en CSV.
+
+        Args:
+            output_file (Optional[str]): Ruta del archivo de salida
+
+        Returns:
+            pl.DataFrame: DataFrame con los ciclos procesados
+        """
+        self.logger.info("Iniciando procesamiento completo de datos de ciclos...")
+
+        try:
+            # Ejecutar pipeline completo
+            self.load_data()
+            self.transform_cycles_data()
+            self.save_to_csv(output_file)
+
+            self.logger.info("Procesamiento completo finalizado exitosamente")
+            return self.cycles_data
+
+        except Exception as e:
+            self.logger.error(f"Error durante el procesamiento: {str(e)}")
+            raise
+
+    def get_summary_stats(self) -> dict:
+        """
+        Retorna estadísticas resumen de los datos procesados.
+
+        Returns:
+            dict: Diccionario con estadísticas clave de los ciclos
+        """
+        if self.cycles_data is None:
+            raise ValueError(
+                "No hay datos procesados. Ejecute transform_cycles_data() primero."
             )
-            predictions.append(stage_8_pred)
 
-            self.logger.info(f"Generated {len(preds)} predictions for Stage 8")
+        stats = {
+            "total_cycles": len(self.cycles_data),
+            "avg_fuel_consumed": self.cycles_data.select(
+                pl.col("FuelConsumed").mean()
+            ).item(),
+            "avg_cycle_duration": self.cycles_data.select(
+                pl.col("CycleDurationSeconds").mean()
+            ).item(),
+            "avg_distance": self.cycles_data.select(pl.col("Distance").mean()).item(),
+            "unique_equipment": self.cycles_data.select(
+                pl.col("Equipment").n_unique()
+            ).item(),
+            "date_range": {
+                "start": self.cycles_data.select(pl.col("TimeStampIni").min()).item(),
+                "end": self.cycles_data.select(pl.col("TimeStampFin").max()).item(),
+            },
+        }
 
-        if not predictions:
-            raise RuntimeError("No data available for any model predictions.")
-
-        # Concatenar y ordenar por TimeStampIni eliminar columna inecesaria
-        predictions_df = pl.concat(predictions).drop("QualityData").sort("TimeStampIni")
-
-        self.logger.info(f"Final predictions dataframe shape: {predictions_df.shape}")
-
-        return predictions_df
+        return stats
 
 
+# Ejemplo de uso
 if __name__ == "__main__":
-    model = LinearRegressionModel()
-    results = model.train_models()
-    predictions_df = model.get_predictions()
-    predictions_df.write_csv("predicted_cycles.csv")
+    # Crear instancia del procesador
+    processor = CycleDataProcessor(
+        input_file="unified_data_T-210.csv", output_file="cycles_data.csv"
+    )
+
+    try:
+        # Procesar todos los datos
+        cycles_df = processor.process_all()
+
+        # Mostrar estadísticas
+        stats = processor.get_summary_stats()
+        print("\n=== ESTADÍSTICAS RESUMEN ===")
+        print(f"Total de ciclos: {stats['total_cycles']}")
+        print(
+            f"Consumo promedio de combustible: {stats['avg_fuel_consumed']:.2f} litros"
+        )
+        print(f"Duración promedio de ciclo: {stats['avg_cycle_duration']:.2f} segundos")
+        print(f"Distancia promedio: {stats['avg_distance']:.2f} metros")
+        print(f"Equipos únicos: {stats['unique_equipment']}")
+        print(
+            f"Rango de fechas: {stats['date_range']['start']} a {stats['date_range']['end']}"
+        )
+
+        # Mostrar muestra de datos
+        print(f"\n=== MUESTRA DE DATOS PROCESADOS ===")
+        print(cycles_df.head())
+
+    except Exception as e:
+        print(f"Error durante el procesamiento: {e}")

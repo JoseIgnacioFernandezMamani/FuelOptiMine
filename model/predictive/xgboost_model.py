@@ -48,8 +48,8 @@ class XGBoostModel:
 
         # XGBoost Regressor with categorical support
         self.model = xgb.XGBRegressor(
-            n_estimators=1000,
-            learning_rate=0.08,
+            n_estimators=2000,
+            learning_rate=0.05,
             max_depth=6,
             min_child_weight=3,
             subsample=0.8,
@@ -59,7 +59,7 @@ class XGBoostModel:
             random_state=42,
             eval_metric="mae",
             early_stopping_rounds=100,
-            reg_alpha=0.1,
+            reg_alpha=0.01,
             reg_lambda=1,
             verbosity=1,
             # ✨ Parámetros clave para soporte nativo de categóricas
@@ -73,7 +73,8 @@ class XGBoostModel:
         self.feature_names = []
 
         # outliers detection model
-        self.iso_forest = IsolationForest(contamination=0.05, random_state=42)
+        self.iso_forest_stage_4 = None
+        self.iso_forest_stage_8 = None
 
         # store test data
         self.X_test = None
@@ -81,12 +82,19 @@ class XGBoostModel:
         # self.logger
         self.logger = get_logger("XGBoost", "xgb.log", console=True)
 
+        # rmse regresion for desicion making
+        self.rmse_threshold = 0
+
     def load_data(self, csv_path: str = "unified_data_T-210.csv"):
         """
         hardcoding for moment, should be improved
         """
         model = LinearRegressionModel()
         results = model.train_models()
+        self.rmse_threshold = (
+            results["stage_4"]["train_metrics"]["rmse"]
+            + results["stage_8"]["train_metrics"]["rmse"]
+        ) / 2
         self.df = model.get_predictions()
 
     def transform_cycles_data(self):
@@ -100,15 +108,16 @@ class XGBoostModel:
             [
                 # Calculation of fuel consumption, with default values
                 pl.when(
-                    ((pl.col("StartCycle") - pl.col("EndCycle")).abs() <= 500)
-                    & ((pl.col("StartCycle") - pl.col("EndCycle")).abs() >= 5)
+                    (
+                        (
+                            pl.col("FuelConsumed") - pl.col("PredictedFuelConsumption")
+                        ).abs()
+                        > self.rmse_threshold
+                    )
+                    & (pl.col("PredictedFuelConsumption") > 0)
                 )
-                .then((pl.col("StartCycle") - pl.col("EndCycle")).abs())
-                .when(((pl.col("StartCycle") - pl.col("EndCycle")) < 5))
-                .then(
-                    pl.col("PredictedFuelConsumption")
-                )  # Default value calculated from the regression model
-                .otherwise(5)  # default minimum consumption
+                .then(pl.col("PredictedFuelConsumption"))
+                .otherwise(pl.col("FuelConsumed"))
                 .alias("FuelConsumed"),
                 pl.when(pl.col("StageSequence") == 8)
                 .then(True)
@@ -160,25 +169,77 @@ class XGBoostModel:
             )
 
         # convine numeric and categorical features
-        X_final = pd.concat([X_numeric, X_categorical], axis=1)
+        df_full = pd.concat([X_numeric, X_categorical], axis=1)
+        df_full["FuelConsumed"] = y
+        df_full["StageSequence"] = df["StageSequence"]
 
-        # outlier detection using numeric features
-        self.iso_forest.fit(X_numeric)
-        outlier_mask = self.iso_forest.predict(X_numeric) == 1
-        X_clean = X_final[outlier_mask]
-        y_clean = y[outlier_mask]
+        # List to hold cleaned data per stage
+        df_clean_list = []
 
-        # save feature names
+        # Apply Isolation Forest separately for each StageSequence value
+        for stage_value in [True, False]:
+            df_stage = df_full[df_full["StageSequence"] == stage_value].copy()
+            if df_stage.empty:
+                continue
+
+            self.logger.info(
+                f"Processing StageSequence={stage_value} with {len(df_stage)} records"
+            )
+
+            # Prepare features for Isolation Forest: numeric + target
+            X_stage_iso = df_stage[self.numeric_predictor_vars].values
+            y_stage = df_stage["FuelConsumed"].values
+            X_with_target = np.hstack([X_stage_iso, y_stage.reshape(-1, 1)])
+
+            # Fit Isolation Forest
+            iso_forest_stage = IsolationForest(
+                contamination=0.05,
+                random_state=42,
+                n_estimators=200,
+                max_samples="auto",
+            )
+            iso_forest_stage.fit(X_with_target)
+            mask = iso_forest_stage.predict(X_with_target) == 1
+
+            n_outliers = np.sum(~mask)
+            outlier_pct = (n_outliers / len(df_stage)) * 100
+            self.logger.info(
+                f"StageSequence={stage_value}: Removed {n_outliers} outliers ({outlier_pct:.2f}%)"
+            )
+
+            # Keep only inliers
+            df_stage_clean = df_stage[mask].copy()
+            df_clean_list.append(df_stage_clean)
+
+            if stage_value:
+                self.iso_forest_stage_8 = iso_forest_stage
+            else:
+                self.iso_forest_stage_4 = iso_forest_stage
+
+        # Concatenate cleaned stages
+        df_cleaned = pd.concat(df_clean_list, axis=0).reset_index(drop=True)
+
+        # Split back numeric, categorical, and target
+        X_numeric_clean = df_cleaned[self.numeric_predictor_vars]
+        X_categorical_clean = df_cleaned[self.categorical_vars]
+        y_clean = df_cleaned["FuelConsumed"]
+
+        # Final feature matrix for XGBoost
+        X_final = pd.concat([X_numeric_clean, X_categorical_clean], axis=1)
+
+        # Save feature names
         self.feature_names = list(X_final.columns)
 
-        self.logger.info(f"Data after cleaning: {len(X_clean)} records.")
+        self.logger.info(
+            f"Final dataset size after stage-wise outlier removal: {len(X_final)} records"
+        )
         self.logger.info(f"Numeric features: {self.numeric_predictor_vars}")
         self.logger.info(f"Categorical features: {self.categorical_vars}")
         self.logger.info("Final dtypes:")
         for col in X_final.columns:
             self.logger.info(f"  {col}: {X_final[col].dtype}")
 
-        return train_test_split(X_clean, y_clean, test_size=0.2, random_state=42)
+        return train_test_split(X_final, y_clean, test_size=0.2, random_state=42)
 
     def train(self):
         """
@@ -263,7 +324,7 @@ class XGBoostModel:
         # store evaluation metrics
         results = {
             "model": str(type(self.model).__name__),
-            "isolation_forest": str(type(self.iso_forest).__name__),
+            # "isolation_forest": str(type(self.iso_forest).__name__),
             "samples": {
                 "train": len(X_train),
                 "test": len(X_test),
@@ -578,11 +639,37 @@ class XGBoostModel:
         residuals_all = y_true_all - y_pred_all
 
         # apply outlier detection on numeric features
-        X_numeric_for_outliers = df_all[self.numeric_predictor_vars]
-        outlier_predictions = self.iso_forest.predict(X_numeric_for_outliers)
+        # CORRECCIÓN: Verificar que los modelos de IsolationForest están entrenados
+        if self.iso_forest_stage_8 is None or self.iso_forest_stage_4 is None:
+            raise RuntimeError(
+                "Los modelos de detección de outliers no están entrenados. Ejecute primero train()."
+            )
 
-        is_inlier = outlier_predictions == 1
-        is_outlier = outlier_predictions == -1
+        # CORRECCIÓN: Aplicar detección de outliers por etapa usando los modelos entrenados
+        is_inlier = np.zeros(len(df_all), dtype=bool)
+        is_outlier = np.zeros(len(df_all), dtype=bool)
+
+        # Para cada etapa, usar el modelo IsolationForest correspondiente
+        for stage_value in [True, False]:
+            stage_mask = df_all["StageSequence"] == stage_value
+            if not stage_mask.any():
+                continue
+
+            # Obtener datos numéricos para esta etapa
+            X_numeric_stage = df_all.loc[stage_mask, self.numeric_predictor_vars]
+            y_stage = df_all.loc[stage_mask, "FuelConsumed"].values
+            X_with_target = np.hstack([X_numeric_stage.values, y_stage.reshape(-1, 1)])
+
+            # Usar el modelo IsolationForest correspondiente
+            if stage_value:
+                outlier_predictions = self.iso_forest_stage_8.predict(X_with_target)
+            else:
+                outlier_predictions = self.iso_forest_stage_4.predict(X_with_target)
+
+            # Actualizar las máscaras de inliers/outliers
+            stage_indices = np.where(stage_mask)[0]
+            is_inlier[stage_indices] = outlier_predictions == 1
+            is_outlier[stage_indices] = outlier_predictions == -1
 
         # convert back to polars and enrich dataset
         result = self.cycles_data.with_columns(
@@ -605,12 +692,11 @@ class XGBoostModel:
                 "ShiftDate",
                 "Equipment",
                 "TruckFleet",
-                "StartCycle",
-                "EndCycle",
+                "MedianFuelLevelLiters",
                 "AvgSpeed",
                 "AvgSlopePercent",
                 "AvgAcceleration",
-                "AvgTimeEfficiencyPercentage",
+                "TimeEfficiencyPercentage",
                 "Latitude",
                 "Longitude",
                 "Elevation",
@@ -809,18 +895,16 @@ class XGBoostModel:
 if __name__ == "__main__":
     # Variables predictoras
     numeric_predictor_vars = [
-        "AvgSpeed",
         "AvgSlopePercent",
-        "AvgAcceleration",
         "TotalMeasuredTonnage",
         "Distance",
         "CycleDurationSeconds",
         "StageSequence",
-        "AvgTimeEfficiencyPercentage",
+        "TimeEfficiencyPercentage",
     ]
 
     # ✨ Todas las categóricas en una sola lista - XGBoost decide el mejor encoding
-    categorical_vars = ["Destination", "DestinationType", "Shovel"]
+    categorical_vars = ["Destination", "DestinationType"]
 
     # Crear modelo con soporte nativo
     model = XGBoostModel(
@@ -844,7 +928,7 @@ if __name__ == "__main__":
         cycles_with_predictions.write_csv("xgboost_predictions.csv")
 
         model.print_feature_importance()
-        model.explain_model(plots=False)
+        # model.explain_model(plots=True)
         # model.predict_manual()
 
         model.plot_predictions("xgboost_predictions.png", resultados)

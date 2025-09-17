@@ -22,13 +22,13 @@ def unify_dataframes(
     # ordenar dataframes
     df_sensor = df_sensor.sort(["TruckFleet", "Equipment", "TimeStamp"])
     df_time_model = df_time_model.sort(["TruckFleet", "Equipment", "TimeStamp"])
-    df_cycle = df_cycle.sort(["TruckFleet", "Equipment", "TimeStamp"])
+    df_cycle = df_cycle.sort(["TruckFleet", "Equipment", "TimeStampIni"])
 
     # Unir sensor con time_model
     df_unified = df_sensor.join_asof(
         df_time_model,
         on="TimeStamp",
-        strategy="forward",
+        strategy="backward",
         suffix="_tm",
         tolerance=f"{max_tolerance_days}d",
         coalesce=False,
@@ -36,8 +36,9 @@ def unify_dataframes(
     )
     df_unified = df_unified.join_asof(
         df_cycle,
-        on="TimeStamp",
-        strategy="forward",
+        left_on="TimeStamp",
+        right_on="TimeStampIni",
+        strategy="backward",
         suffix="_cycle",
         tolerance=f"{max_tolerance_days}d",
         coalesce=False,
@@ -113,7 +114,7 @@ def unify_dataframes(
     # Crear columna temporal para ordenamiento y ordenar
     df_unified = df_unified.with_columns(
         pl.coalesce(
-            [pl.col("TimeStamp"), pl.col("TimeStamp_tm"), pl.col("TimeStamp_cycle")]
+            [pl.col("TimeStamp"), pl.col("TimeStamp_tm"), pl.col("TimeStampIni")]
         ).alias("SortTimestamp")
     ).sort("SortTimestamp")
 
@@ -121,7 +122,6 @@ def unify_dataframes(
     exclude_columns = [
         "TimeModelId",
         "CycleId",
-        "TimeStamp_cycle",
         "SortTimestamp",
         "Equipment",
         "TruckFleet",
@@ -161,8 +161,8 @@ def unify_dataframes(
     df_unified = df_unified.with_columns(
         pl.when(pl.col("StageSequence").is_null())
         .then(None)
-        .otherwise(pl.col("TimeStamp_cycle"))
-        .alias("TimeStamp_cycle"),
+        .otherwise(pl.col("TimeStampIni"))
+        .alias("TimeStampIni"),
     )
 
     df_unified = df_unified.with_columns(
@@ -189,6 +189,11 @@ def unify_dataframes(
         pl.col("Latitude").forward_fill(),
         pl.col("Longitude").forward_fill(),
         pl.col("Elevation").forward_fill(),
+        pl.col("TimeModelId").forward_fill(),
+        pl.col("CycleId").forward_fill(),
+        pl.col("Status").forward_fill(),
+        pl.col("Category").forward_fill(),
+        pl.col("Event").forward_fill(),
         pl.col("SpeedAvg").fill_null(0),
         pl.col("Acceleration").fill_null(0),
         pl.col("DistanceTraveled").fill_null(0),

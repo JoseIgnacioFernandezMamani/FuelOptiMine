@@ -179,7 +179,25 @@ class CycleTransformer(BaseTransformer):
                 .when(pl.col("duration_col_name") == "UnloadingMaterial")
                 .then(pl.col("UnloadingMaterial"))
                 .alias("RecordDuration"),
-                # Dynamic timestamp selection
+                # Dynamic timestamp selection initial
+                pl.when(pl.col("end_col_name") == "E_TravelingEnd")
+                .then(pl.col("E_TravelingStart"))
+                .when(pl.col("end_col_name") == "E_WaitingEnd")
+                .then(pl.col("E_WaitingStart"))
+                .when(pl.col("end_col_name") == "E_SpottingEnd")
+                .then(pl.col("E_SpottingStart"))
+                .when(pl.col("end_col_name") == "E_LoadingEnd")
+                .then(pl.col("E_LoadingStart"))
+                .when(pl.col("end_col_name") == "L_HaulingEnd")
+                .then(pl.col("L_HaulingStart"))
+                .when(pl.col("end_col_name") == "L_WaitingEnd")
+                .then(pl.col("L_WaitingStart"))
+                .when(pl.col("end_col_name") == "L_SpottingEnd")
+                .then(pl.col("L_SpottingStart"))
+                .when(pl.col("end_col_name") == "L_UnloadingEnd")
+                .then(pl.col("L_UnloadingStart"))
+                .alias("TimeStampIni"),
+                # Dynamic timestamp selection final
                 pl.when(pl.col("end_col_name") == "E_TravelingEnd")
                 .then(pl.col("E_TravelingEnd"))
                 .when(pl.col("end_col_name") == "E_WaitingEnd")
@@ -196,7 +214,7 @@ class CycleTransformer(BaseTransformer):
                 .then(pl.col("L_SpottingEnd"))
                 .when(pl.col("end_col_name") == "L_UnloadingEnd")
                 .then(pl.col("L_UnloadingEnd"))
-                .alias("TimeStamp"),
+                .alias("TimeStampFin"),
             ]
         )
 
@@ -204,30 +222,30 @@ class CycleTransformer(BaseTransformer):
         df_result = df_expanded.with_columns(
             [
                 # LoadingZone logic
-                pl.when(pl.col("category").is_in(["empty", "loading"]))
+                pl.when(pl.col("category").is_in(["loading"]))
                 .then(pl.col("LoadingZone"))
                 .otherwise(pl.lit(None))
                 .alias("LoadingZone_final"),
                 # Material logic
-                pl.when(pl.col("category").is_in(["loading", "loaded", "unloading"]))
+                pl.when(pl.col("category").is_in(["unloading"]))
                 .then(pl.col("Material"))
                 .otherwise(pl.lit(None))
                 .alias("Material_final"),
                 # Tonnage logic
-                pl.when(pl.col("category").is_in(["loading", "loaded", "unloading"]))
+                pl.when(pl.col("category").is_in(["unloading"]))
                 .then(pl.col("MeasuredTonnage"))
                 .otherwise(pl.lit(None))
                 .alias("MeasuredTonnage_final"),
-                pl.when(pl.col("category").is_in(["loading", "loaded", "unloading"]))
+                pl.when(pl.col("category").is_in(["unloading"]))
                 .then(pl.col("ReportedTonnage"))
                 .otherwise(pl.lit(None))
                 .alias("ReportedTonnage_final"),
                 # Destination logic
-                pl.when(pl.col("category").is_in(["loading", "loaded", "unloading"]))
+                pl.when(pl.col("category").is_in(["unloading"]))
                 .then(pl.col("DestinationType"))
                 .otherwise(pl.lit(None))
                 .alias("DestinationType_final"),
-                pl.when(pl.col("category").is_in(["loading", "loaded", "unloading"]))
+                pl.when(pl.col("category").is_in(["unloading"]))
                 .then(pl.col("Destination"))
                 .otherwise(pl.lit(None))
                 .alias("Destination_final"),
@@ -288,7 +306,8 @@ class CycleTransformer(BaseTransformer):
                 "StageType",
                 "StageSequence",
                 "RecordDuration",
-                "TimeStamp",
+                "TimeStampIni",
+                "TimeStampFin",
                 pl.col("LoadingZone_final").alias("LoadingZone"),
                 pl.col("Material_final").alias("Material"),
                 pl.col("MeasuredTonnage_final").alias("MeasuredTonnage"),
