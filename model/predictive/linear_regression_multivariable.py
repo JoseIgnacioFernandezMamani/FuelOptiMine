@@ -173,48 +173,12 @@ class LinearRegressionModel:
                     pl.col("TruckFleet")
                     .last()
                     .alias("TruckFleet"),  # fin de los metadatos
-                    # modelo de estados
-                    pl.col("Status").eq("OPERATIVO").sum().alias("OperativeCount"),
-                    pl.col("Status").eq("DEMORA").sum().alias("DelayCount"),
-                    pl.col("Status")
-                    .eq("MANTENIMIENTO")
-                    .sum()
-                    .alias("MaintenanceCount"),
-                    pl.col("Status").eq("RESERVA").sum().alias("ReserveCount"),
-                    # modelo de categorias
-                    # OPERATIVO
-                    pl.col("Category").eq("EFECTIVO").sum().alias("EffectiveCount"),
-                    # DEMORA
-                    pl.col("Category")
-                    .eq("D_PROGRAMADA")
-                    .sum()
-                    .alias("ScheduledDelayCount"),
-                    pl.col("Category")
-                    .eq("D_NO_PROGRAMADA")
-                    .sum()
-                    .alias("UnscheduledDelayCount"),
-                    # RESERVA
-                    pl.col("Category")
-                    .eq("RESERVA")
-                    .sum()
-                    .alias("CategoryReserveCount"),
-                    # MANTENIMIENTO
-                    pl.col("Category")
-                    .eq("M_PROGRAMADO")
-                    .sum()
-                    .alias("ScheduledMaintenanceCount"),
-                    pl.col("Category")
-                    .eq("M_NO_PROGRAMADO")
-                    .sum()
-                    .alias("UnscheduledMaintenanceCount"),
-                    # REPARACION
-                    pl.col("Category").eq("REPARACION").sum().alias("RepairCount"),
                     # variables para calculo, consumo de combustible
                     pl.col("MedianFuelLevelLiters")
                     .last()
                     .alias("MedianFuelLevelLiters"),
                     # variables numericas para modelo
-                    pl.col("SpeedAvg").mean().alias("AvgSpeed"),
+                    pl.col("SpeedAvg").mean().alias("SpeedAvg"),
                     pl.col("SlopePercent").mean().alias("AvgSlopePercent"),
                     pl.col("Acceleration").mean().alias("AvgAcceleration"),
                     pl.col("TimeEfficiencyPercentage")
@@ -291,7 +255,7 @@ class LinearRegressionModel:
                     .abs()
                     < 50
                 )
-                & (pl.col("AvgSpeed") > 0.1)
+                & (pl.col("SpeedAvg") > 0.1)
                 & (pl.col("Distance") > 50)
                 & (pl.col("Distance") <= 3600)
             )
@@ -299,7 +263,7 @@ class LinearRegressionModel:
                 # Duración = distancia(m) / velocidad(m/s)
                 pl.min_horizontal(
                     [
-                        (pl.col("Distance") / (pl.col("AvgSpeed") / 3.6)),
+                        (pl.col("Distance") / (pl.col("SpeedAvg") / 3.6)),
                         pl.lit(float(900)),
                     ]
                 ).clip(lower_bound=180)
@@ -335,35 +299,7 @@ class LinearRegressionModel:
             )
         )
 
-        self.cycles_data = self.best_data_for_train(result).filter(
-            (
-                (pl.col("StageSequence") == 4)
-                & (pl.col("Distance") > 0)
-                & (pl.col("Distance").is_not_null())
-                & (pl.col("Distance") < 5000)
-                & (pl.col("CycleDurationSeconds") > 0)
-                & (pl.col("CycleDurationSeconds").is_not_null())
-                & (pl.col("CycleDurationSeconds") < 3600)
-                & (pl.col("FuelConsumed") > 0)
-                & (pl.col("FuelConsumed").is_not_null())
-                & (pl.col("FuelConsumed") < 110)
-            )
-            | (
-                (pl.col("StageSequence") == 8)
-                & (pl.col("TotalMeasuredTonnage") > 0)
-                & (pl.col("TotalMeasuredTonnage").is_not_null())
-                & (pl.col("TotalMeasuredTonnage") < 300)
-                & (pl.col("Distance") > 0)
-                & (pl.col("Distance").is_not_null())
-                & (pl.col("Distance") < 5000)
-                & (pl.col("CycleDurationSeconds") > 0)
-                & (pl.col("CycleDurationSeconds").is_not_null())
-                & (pl.col("CycleDurationSeconds") < 3600)
-                & (pl.col("FuelConsumed") > 0)
-                & (pl.col("FuelConsumed").is_not_null())
-                & (pl.col("FuelConsumed") < 110)
-            )
-        )
+        self.cycles_data = self.best_data_for_train(result)
         self.logger.info(
             f"Transformación completada: {len(self.cycles_data)} ciclos procesados"
         )
