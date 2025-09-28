@@ -19,12 +19,10 @@ logger = logging.getLogger(__name__)
 
 class DataUnifier:
     """
-    High-level data integration component that consolidates multiple operational sources—
-    sensor telemetry, time model events, and cycle metrics—into a single, analysis-ready dataset.
+    A high-level data integration component that consolidates multiple operational data sources
+    — sensor, time model events, and cycle metrics — into a single, coherent, analysis-ready dataset.
 
-    This class prepares unified data before loading into the database.
-
-    The unified output is used as a foundational dataset for downstream analytics and database storage.
+    This class is pre loader to database.
     """
 
     def __init__(self, max_tolerance_days: int = 365):
@@ -138,7 +136,6 @@ class DataUnifier:
             "SpeedAvg",
             "Acceleration",
             "SlopePercent",
-            "CycleId",
         }
 
     def _validate_dataframes(
@@ -318,7 +315,7 @@ class DataUnifier:
 
         return df.with_columns(
             [
-                pl.when((pl.col(col) == pl.col(col).shift(-1)))
+                pl.when(pl.col(col) == pl.col(col).shift(-1))
                 .then(None)
                 .otherwise(pl.col(col))
                 .alias(col)
@@ -330,6 +327,7 @@ class DataUnifier:
         """
         Applies batch strategies to fill missing values in specified columns of the DataFrame.
 
+        - Performs backward fill on columns listed in FORWARD_FILL_COLS that exist in the DataFrame.
         - Performs forward fill on columns listed in FORWARD_FILL_COLS that exist in the DataFrame.
 
         Args:
@@ -340,6 +338,11 @@ class DataUnifier:
         """
         if len(df) == 0:
             return df
+
+        # backward fill
+        forward_cols = [col for col in self.forward_fill_cols if col in df.columns]
+        if forward_cols:
+            df = df.with_columns([pl.col(col).backward_fill() for col in forward_cols])
 
         # Forward fill
         forward_cols = [col for col in self.forward_fill_cols if col in df.columns]
@@ -454,12 +457,24 @@ class DataUnifier:
 
         df_sensor = df_sensor.select(sensor_cols).sort("TimeStamp")
         df_time_model = df_time_model.select(tm_cols).sort("TimeStamp")
-        df_cycle = (
-            df_cycle.filter(pl.col("StageSecuence") != 1)
-            .select(cycle_cols)
-            .sort("TimeStampFin")
-        )
-        df_cycle_st1 = df_cycle.filter(pl.col("StageSecuence") == 1)
+
+        # Special dataframe: swap the values of TimeStampIni with TimeStampFin and vice versa
+        df_cycle = df_cycle.select(cycle_cols)
+
+        logger.info("Intercambiando timestamps para StageSequence == 1 en cycle")
+        df_cycle = df_cycle.with_columns(
+            [
+                pl.when(pl.col("StageSequence") == 1)
+                .then(pl.col("TimeStampFin"))
+                .otherwise(pl.col("TimeStampIni"))
+                .alias("TimeStampIni"),
+                pl.when(pl.col("StageSequence") == 1)
+                .then(pl.col("TimeStampIni"))
+                .otherwise(pl.col("TimeStampFin"))
+                .alias("TimeStampFin"),
+            ]
+        ).sort("TimeStampFin")
+
         # 3. temporal joins
         df_unified = self._perform_joins(df_sensor, df_time_model, df_cycle)
 
@@ -491,66 +506,19 @@ class DataUnifier:
         df_unified = self._apply_fill_strategies(df_unified)
         df_unified = self._apply_business_logic(df_unified)
 
+        # 9. devolver el estado de timestamp de cyclo a su estado original
+        df_unified = df_unified.with_columns(
+            [
+                pl.when(pl.col("StageSequence") == 1)
+                .then(pl.col("TimeStampFin"))
+                .otherwise(pl.col("TimeStampIni"))
+                .alias("TimeStampIni"),
+                pl.when(pl.col("StageSequence") == 1)
+                .then(pl.col("TimeStampIni"))
+                .otherwise(pl.col("TimeStampFin"))
+                .alias("TimeStampFin"),
+            ]
+        )
+
         logger.info(f"Unificación completada. Filas resultantes: {len(df_unified)}")
-        return df_unified
-
-
-def main():
-    """Función principal simplificada."""
-    truck_id = "T-210"
-    dataset_name = "train_data"
-
-    try:
-        logger.info(f"Iniciando procesamiento para {truck_id}")
-
-        # Extraer datos
-        extractor = CSVExtractor(dataset_name, truck_id)
-        raw_data = extractor.load_data()
-
-        # Transformar datos
-        transformers = {
-            "sensor": SensorTransformer(truck_id=truck_id),
-            "cycle": CycleTransformer(),
-            "time_model": TimeModelTransformer(),
-        }
-
-        transformed_data = {}
-        for data_type, transformer in transformers.items():
-            result = transformer.run_transform(raw_data[data_type])
-            if result is None or len(result) == 0:
-                raise ValueError(f"Transformación de {data_type} falló o está vacía")
-
-            transformed_data[data_type] = result
-            logger.info(f"Transformación {data_type}: {len(result)} filas")
-
-        # Unify data
-        unifier = DataUnifier(max_tolerance_days=365)
-        unified_df = unifier.unify(
-            df_sensor=transformed_data["sensor"],
-            df_time_model=transformed_data["time_model"],
-            df_cycle=transformed_data["cycle"],
-        )
-
-        # Guardar resultado
-        output_filename = f"unified_data_{truck_id}.csv"
-        unified_df.write_csv(output_filename)
-
-        logger.info(f"Procesamiento completado. Archivo: {output_filename}")
-        logger.info(
-            f"Estadísticas: {len(unified_df)} filas, {len(unified_df.columns)} columnas"
-        )
-
-        # Mostrar columnas
-        logger.info("Columnas disponibles:")
-        for i, col in enumerate(unified_df.columns[:10]):
-            logger.info(f"   • {col}")
-        if len(unified_df.columns) > 10:
-            logger.info(f"   • ... y {len(unified_df.columns) - 10} columnas más")
-
-    except Exception as e:
-        logger.error(f"Error: {str(e)}")
-        raise
-
-
-if __name__ == "__main__":
-    main()
+        return df_unified.unique()

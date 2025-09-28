@@ -693,7 +693,7 @@ class XGBoostModel:
                 "Equipment",
                 "TruckFleet",
                 "MedianFuelLevelLiters",
-                "AvgSpeed",
+                "SpeedAvg",
                 "AvgSlopePercent",
                 "AvgAcceleration",
                 "TimeEfficiencyPercentage",
@@ -927,11 +927,11 @@ if __name__ == "__main__":
         # Para guardar en CSV
         cycles_with_predictions.write_csv("xgboost_predictions.csv")
 
-        model.print_feature_importance()
-        # model.explain_model(plots=True)
+        # model.print_feature_importance()
+        model.explain_model(plots=True)
         # model.predict_manual()
 
-        model.plot_predictions("xgboost_predictions.png", resultados)
+        # model.plot_predictions("xgboost_predictions.png", resultados)
         # model.save_model()
 
     except Exception as e:

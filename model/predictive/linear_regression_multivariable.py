@@ -21,6 +21,8 @@ import logging
 import datetime
 
 from model.utils.model_utils import analyze_multicollinearity, log_results, get_logger
+from etl_core.load.utils.config import CH_CONFIG, create_client
+import sys
 
 
 class LinearRegressionModel:
@@ -58,20 +60,79 @@ class LinearRegressionModel:
         self.df: pl.DataFrame = pl.DataFrame()
 
         # self.logger
-        self.logger = get_logger("LinearRegression", "lrm.log", console=False)
+        self.logger = get_logger("LinearRegression", "lrm.log", console=True)
 
-    def load_data(self):
+    def load_data(self, truck_id: str = "T-210"):
         """
-        Load data from CSV file (hardcoding for now).
-        """
-        self.logger.info("Cargando datos desde ...")
-        df = pl.read_csv(
-            "unified_data_T-210.csv",
-            try_parse_dates=True,
-        )
+        Load data from ClickHouse or CSV file.
 
-        self.df = df.sort("SortTimestamp")
+        Args:
+            truck_id: ID del camión específico (ej: 'T-210'). Si None, carga todos los camiones
+            from_clickhouse: Si True carga desde ClickHouse, si False desde CSV
+        """
+        self.logger.info(f"Cargando datos desde ClickHouse para {truck_id}")
+        client = create_client(CH_CONFIG, self.logger)
+
+        query = f"""
+        SELECT *
+        FROM {CH_CONFIG['database']}.xgboost_fuel
+        WHERE Equipment = '{truck_id}'
+        ORDER BY SortTimestamp
+        """
+
+        result = client.query(query)
+
+        # Crear DataFrame de pandas manualmente
+        columns = result.column_names
+        data = result.result_rows
+
+        df_pandas = pd.DataFrame(data, columns=columns)
+
+        # Convertir a polars
+        self.df = pl.from_pandas(df_pandas)
+
+        client.close()
+
         self.logger.info(f"Datos cargados exitosamente: {len(self.df)} registros")
+
+    @staticmethod
+    def theil_fuel_consumption(fuel_levels: List[float]) -> float:
+        """
+        Función Theil-Sen para cálculo robusto de consumo de combustible.
+        Args:
+            fuel_levels: Lista de niveles de combustible ordenados temporalmente
+        Returns:
+            float: Consumo de combustible estimado (diferencia inicio-fin de la regresión)
+        """
+        fuel_list = fuel_levels.to_list()
+        if len(fuel_list) < 3:
+            return max(0.0, fuel_list[0] - fuel_list[-1])
+
+        try:
+            y = np.array(fuel_list, dtype=np.float64)
+            X = np.arange(1, len(y) + 1).reshape(-1, 1)
+
+            # Theil-Sen Regressor - robusto y estable
+            theil_sen = linear_model.TheilSenRegressor(
+                fit_intercept=True,
+                max_subpopulation=1e4,
+                n_subsamples=None,
+                max_iter=300,
+                tol=1e-3,
+                random_state=42,
+            )
+
+            theil_sen.fit(X, y)
+
+            # Calcular predicciones
+            pred_inicio = theil_sen.predict([[1]])[0]
+            pred_fin = theil_sen.predict([[len(y)]])[0]
+
+            return abs(pred_inicio - pred_fin)
+
+        except Exception:
+            # Fallback al método simple
+            return max(0.0, fuel_levels[0] - fuel_levels[-1])
 
     def transform_cycles_data(self):
         """
@@ -109,9 +170,8 @@ class LinearRegressionModel:
             [
                 # rolling median del nivel de combustible
                 pl.col("FuelLevelLiters")
-                .cast(pl.Float64)
-                .rolling_median(window_size=10, min_samples=3, center=True)
-                .fill_null(0)
+                # .rolling_median(window_size=10, min_samples=3, center=True)
+                # .fill_null(0)
                 .alias("MedianFuelLevelLiters"),
                 # unificar destinos
                 pl.coalesce([pl.col("LoadingZone"), pl.col("Destination")]).alias(
@@ -174,9 +234,7 @@ class LinearRegressionModel:
                     .last()
                     .alias("TruckFleet"),  # fin de los metadatos
                     # variables para calculo, consumo de combustible
-                    pl.col("MedianFuelLevelLiters")
-                    .last()
-                    .alias("MedianFuelLevelLiters"),
+                    pl.col("MedianFuelLevelLiters").alias("FuelLevelsList"),
                     # variables numericas para modelo
                     pl.col("SpeedAvg").mean().alias("SpeedAvg"),
                     pl.col("SlopePercent").mean().alias("AvgSlopePercent"),
@@ -226,7 +284,7 @@ class LinearRegressionModel:
             .otherwise(pl.col("TimeStampFin"))
             .alias("TimeStampFin"),
             # Combustible consumido (sin cambios)
-            pl.col("MedianFuelLevelLiters").diff().abs().alias("FuelConsumed"),
+            # pl.col("MedianFuelLevelLiters").diff().abs().alias("FuelConsumed"),
             # ajustar TimeEfficiencyPercentage
             pl.when(
                 (pl.col("StageSequence") == 4)
@@ -299,141 +357,27 @@ class LinearRegressionModel:
             )
         )
 
-        self.cycles_data = self.best_data_for_train(result)
+        # calcular combustible consumido usando RANSAC simplificado
+        result = result.with_columns(
+            [
+                pl.col("FuelLevelsList")
+                .map_elements(
+                    lambda fuel_list: LinearRegressionModel.theil_fuel_consumption(
+                        fuel_list
+                    ),
+                    return_dtype=pl.Float64,
+                )
+                .alias("FuelConsumed")
+            ]
+        )
+
+        # eliminar fuellevel list
+        self.cycles_data = result.drop("FuelLevelsList")
+        # self.cycles_data = self.best_data_for_train(result)
+
         self.logger.info(
             f"Transformación completada: {len(self.cycles_data)} ciclos procesados"
         )
-
-    def best_data_for_train(self, result: pl.DataFrame) -> pl.DataFrame:
-
-        # obtener dataframes separados por stage
-        df_stage4 = result.filter(pl.col("StageSequence") == 4)
-        df_stage8 = result.filter(pl.col("StageSequence") == 8)
-
-        stats = {"stage4": {}, "stage8": {}}
-        # columnas específicas por stage
-        cols_stage4 = ["Distance", "CycleDurationSeconds", "FuelConsumed"]
-        cols_stage8 = [
-            "TotalMeasuredTonnage",
-            "Distance",
-            "CycleDurationSeconds",
-            "FuelConsumed",
-        ]
-
-        # --- Stage 4 ---
-        for col in cols_stage4:
-            values = df_stage4.select(
-                [
-                    pl.col(col).quantile(0.10).alias("q1"),
-                    pl.col(col).quantile(0.90).alias("q3"),
-                ]
-            ).row(0)
-
-            q1, q3 = values
-
-            stats["stage4"][col] = {
-                "q1": q1,
-                "q3": q3,
-            }
-
-        # --- Stage 8 ---
-        for col in cols_stage8:
-            values = df_stage8.select(
-                [
-                    pl.col(col).quantile(0.1).alias("q1"),
-                    pl.col(col).quantile(0.90).alias("q3"),
-                ]
-            ).row(0)
-
-            q1, q3 = values
-
-            stats["stage8"][col] = {
-                "q1": q1,
-                "q3": q3,
-            }
-
-        # ordenar por fuelConsumed
-        df_stage4 = df_stage4.sort("FuelConsumed")
-        df_stage4 = df_stage4.with_columns(
-            pl.col("Distance").diff().alias("delta_distance"),
-            pl.col("CycleDurationSeconds").diff().alias("delta_duration"),
-            pl.col("TotalMeasuredTonnage").diff().alias("delta_tonnage"),
-        )
-        df_stage8 = df_stage8.sort("FuelConsumed")
-        df_stage8 = df_stage8.with_columns(
-            pl.col("Distance").diff().alias("delta_distance"),
-            pl.col("CycleDurationSeconds").diff().alias("delta_duration"),
-            pl.col("TotalMeasuredTonnage").diff().alias("delta_tonnage"),
-        )
-
-        # aplicar filtro de buen dato o mal dato
-        df_stage4 = df_stage4.with_columns(
-            pl.when(
-                (pl.col("FuelConsumed") <= stats["stage4"]["FuelConsumed"]["q1"])
-                | (pl.col("FuelConsumed") >= stats["stage4"]["FuelConsumed"]["q3"])
-                | (pl.col("Distance") <= stats["stage4"]["Distance"]["q1"])
-                | (pl.col("Distance") >= stats["stage4"]["Distance"]["q3"])
-                | (
-                    pl.col("CycleDurationSeconds")
-                    <= stats["stage4"]["CycleDurationSeconds"]["q1"]
-                )
-                | (
-                    pl.col("CycleDurationSeconds")
-                    >= stats["stage4"]["CycleDurationSeconds"]["q3"]
-                )
-                | (
-                    # Regla de patrón de crecimiento: al menos uno debe crecer
-                    ~((pl.col("delta_distance") > 0) | (pl.col("delta_duration") > 0))
-                )
-            )
-            .then(False)
-            .otherwise(True)
-            .alias("QualityData")
-        )
-
-        df_stage8 = df_stage8.with_columns(
-            pl.when(
-                (pl.col("FuelConsumed") <= stats["stage8"]["FuelConsumed"]["q1"])
-                | (pl.col("FuelConsumed") >= stats["stage8"]["FuelConsumed"]["q3"])
-                | (pl.col("Distance") <= stats["stage8"]["Distance"]["q1"])
-                | (pl.col("Distance") >= stats["stage8"]["Distance"]["q3"])
-                | (
-                    pl.col("CycleDurationSeconds")
-                    <= stats["stage8"]["CycleDurationSeconds"]["q1"]
-                )
-                | (
-                    pl.col("CycleDurationSeconds")
-                    >= stats["stage8"]["CycleDurationSeconds"]["q3"]
-                )
-                | (
-                    pl.col("TotalMeasuredTonnage")
-                    <= stats["stage8"]["TotalMeasuredTonnage"]["q1"]
-                )
-                | (
-                    pl.col("TotalMeasuredTonnage")
-                    >= stats["stage8"]["TotalMeasuredTonnage"]["q3"]
-                )
-                | (
-                    # Regla de patrón de crecimiento: al menos uno debe crecer
-                    ~(
-                        (pl.col("delta_distance") > 0)
-                        | (pl.col("delta_duration") > 0)
-                        | (pl.col("delta_tonnage") > 0)
-                    )
-                )
-            )
-            .then(False)
-            .otherwise(True)
-            .alias("QualityData")
-        )
-
-        concat_df = (
-            pl.concat([df_stage4, df_stage8])
-            .sort("cycle_group")
-            .drop(["delta_distance", "delta_duration", "delta_tonnage"])
-        )
-
-        return concat_df
 
     def prepare_data_for_stage(
         self,
@@ -609,8 +553,8 @@ class LinearRegressionModel:
         self.transform_cycles_data()
 
         # Separate data by stage for independent model training
-        stage_4_data = self.cycles_data.filter(pl.col("QualityData"))
-        stage_8_data = self.cycles_data.filter(pl.col("QualityData"))
+        stage_4_data = self.cycles_data.filter(pl.col("StageSequence") == 4)
+        stage_8_data = self.cycles_data.filter(pl.col("StageSequence") == 8)
 
         self.logger.info("Entrenando el modelo stage_4")
 
@@ -623,6 +567,12 @@ class LinearRegressionModel:
             random_state,
             self.predictor_vars,
         )
+        if len(stage_4_scaled_data["y_train"]) < 3:
+            self.logger.error(
+                "No hay suficientes datos para entrenar el modelo Stage 4"
+            )
+            raise ValueError("No hay suficientes datos para entrenar el modelo Stage 4")
+
         self.model_stage_4 = LinearRegression().fit(
             stage_4_scaled_data["X_train"], stage_4_scaled_data["y_train"]
         )
@@ -641,6 +591,12 @@ class LinearRegressionModel:
             random_state,
             self.predictor_vars,
         )
+        if len(stage_8_scaled_data["y_train"]) < 3:
+            self.logger.error(
+                "No hay suficientes datos para entrenar el modelo Stage 8"
+            )
+            raise ValueError("No hay suficientes datos para entrenar el modelo Stage 8")
+
         self.model_stage_8 = LinearRegression().fit(
             stage_8_scaled_data["X_train"], stage_8_scaled_data["y_train"]
         )
@@ -784,7 +740,7 @@ class LinearRegressionModel:
             raise RuntimeError("No data available for any model predictions.")
 
         # Concatenar y ordenar por TimeStampIni eliminar columna inecesaria
-        predictions_df = pl.concat(predictions).drop("QualityData").sort("TimeStampIni")
+        predictions_df = pl.concat(predictions).sort("TimeStampIni")
 
         self.logger.info(f"Final predictions dataframe shape: {predictions_df.shape}")
 

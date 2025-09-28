@@ -1,5 +1,5 @@
 from etl_core.load.utils.config import CH_CONFIG, create_client
-from etl_core.utils.fuel_optimine_table import CREATE_TABLE_LSTM_FUEL
+from etl_core.utils import CREATE_TABLE_XGBOOST_FUEL
 import logging
 from typing import Any
 
@@ -43,7 +43,7 @@ class ClickHouseInitializer:
     def initialize_database(self):
         """Initializes the database and creates tables"""
         self.create_database()
-        self.create_table(CREATE_TABLE_LSTM_FUEL)
+        self.create_table(CREATE_TABLE_XGBOOST_FUEL)
         self.logger.info("Base de datos inicializada exitosamente")
 
     def close(self):
