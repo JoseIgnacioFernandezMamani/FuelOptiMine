@@ -23,6 +23,8 @@ import datetime
 from model.utils.model_utils import analyze_multicollinearity, log_results, get_logger
 from etl_core.load.utils.config import CH_CONFIG, create_client
 import sys
+import warnings
+from sklearn.exceptions import ConvergenceWarning
 
 
 class LinearRegressionModel:
@@ -98,31 +100,35 @@ class LinearRegressionModel:
     @staticmethod
     def theil_fuel_consumption(fuel_levels: List[float]) -> float:
         """
-        Función Theil-Sen para cálculo robusto de consumo de combustible.
+        Función Theil-Sen para cálculo robusto de consumo de combustible en rangos de datos de nivel de combustible, son pocos datos, la idea es aproximar una tendencia a la baja para obtener una aproximacion del consumo de combustible.
+
         Args:
             fuel_levels: Lista de niveles de combustible ordenados temporalmente
         Returns:
             float: Consumo de combustible estimado (diferencia inicio-fin de la regresión)
         """
-        fuel_list = fuel_levels.to_list()
-        if len(fuel_list) < 3:
-            return max(0.0, fuel_list[0] - fuel_list[-1])
+        if len(fuel_levels) < 3:
+            return max(0.0, fuel_levels[0] - fuel_levels[-1])
 
         try:
-            y = np.array(fuel_list, dtype=np.float64)
+            y = np.array(fuel_levels, dtype=np.float64)
             X = np.arange(1, len(y) + 1).reshape(-1, 1)
 
-            # Theil-Sen Regressor - robusto y estable
-            theil_sen = linear_model.TheilSenRegressor(
-                fit_intercept=True,
-                max_subpopulation=1e4,
-                n_subsamples=None,
-                max_iter=300,
-                tol=1e-3,
-                random_state=42,
-            )
+            # Theil-Sen Regressor - robust and stable
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
-            theil_sen.fit(X, y)
+                # Theil-Sen with optimized parameters for small datasets
+                theil_sen = linear_model.TheilSenRegressor(
+                    fit_intercept=True,
+                    max_subpopulation=min(1e4, len(fuel_levels) * 100),
+                    n_subsamples=min(len(fuel_levels), 50),
+                    max_iter=100,
+                    tol=1e-2,
+                    random_state=42,
+                )
+
+                theil_sen.fit(X, y)
 
             # Calcular predicciones
             pred_inicio = theil_sen.predict([[1]])[0]
