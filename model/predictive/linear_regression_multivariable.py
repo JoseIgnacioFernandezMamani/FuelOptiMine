@@ -378,12 +378,143 @@ class LinearRegressionModel:
         )
 
         # eliminar fuellevel list
-        self.cycles_data = result.drop("FuelLevelsList")
-        # self.cycles_data = self.best_data_for_train(result)
+        result = result.drop("FuelLevelsList")
+        self.cycles_data = self.best_data_for_train(result)
 
         self.logger.info(
             f"Transformación completada: {len(self.cycles_data)} ciclos procesados"
         )
+
+    def best_data_for_train(self, result: pl.DataFrame) -> pl.DataFrame:
+
+        # obtener dataframes separados por stage
+        df_stage4 = result.filter(pl.col("StageSequence") == 4)
+        df_stage8 = result.filter(pl.col("StageSequence") == 8)
+
+        stats = {"stage4": {}, "stage8": {}}
+        # columnas específicas por stage
+        cols_stage4 = ["Distance", "CycleDurationSeconds", "FuelConsumed"]
+        cols_stage8 = [
+            "TotalMeasuredTonnage",
+            "Distance",
+            "CycleDurationSeconds",
+            "FuelConsumed",
+        ]
+
+        # --- Stage 4 ---
+        for col in cols_stage4:
+            values = df_stage4.select(
+                [
+                    pl.col(col).quantile(0.10).alias("q1"),
+                    pl.col(col).quantile(0.90).alias("q3"),
+                ]
+            ).row(0)
+
+            q1, q3 = values
+
+            stats["stage4"][col] = {
+                "q1": q1,
+                "q3": q3,
+            }
+
+        # --- Stage 8 ---
+        for col in cols_stage8:
+            values = df_stage8.select(
+                [
+                    pl.col(col).quantile(0.1).alias("q1"),
+                    pl.col(col).quantile(0.90).alias("q3"),
+                ]
+            ).row(0)
+
+            q1, q3 = values
+
+            stats["stage8"][col] = {
+                "q1": q1,
+                "q3": q3,
+            }
+
+        # ordenar por fuelConsumed
+        df_stage4 = df_stage4.sort("FuelConsumed")
+        df_stage4 = df_stage4.with_columns(
+            pl.col("Distance").diff().alias("delta_distance"),
+            pl.col("CycleDurationSeconds").diff().alias("delta_duration"),
+            pl.col("TotalMeasuredTonnage").diff().alias("delta_tonnage"),
+        )
+        df_stage8 = df_stage8.sort("FuelConsumed")
+        df_stage8 = df_stage8.with_columns(
+            pl.col("Distance").diff().alias("delta_distance"),
+            pl.col("CycleDurationSeconds").diff().alias("delta_duration"),
+            pl.col("TotalMeasuredTonnage").diff().alias("delta_tonnage"),
+        )
+
+        # aplicar filtro de buen dato o mal dato
+        df_stage4 = df_stage4.with_columns(
+            pl.when(
+                (pl.col("FuelConsumed") <= stats["stage4"]["FuelConsumed"]["q1"])
+                | (pl.col("FuelConsumed") >= stats["stage4"]["FuelConsumed"]["q3"])
+                | (pl.col("Distance") <= stats["stage4"]["Distance"]["q1"])
+                | (pl.col("Distance") >= stats["stage4"]["Distance"]["q3"])
+                | (
+                    pl.col("CycleDurationSeconds")
+                    <= stats["stage4"]["CycleDurationSeconds"]["q1"]
+                )
+                | (
+                    pl.col("CycleDurationSeconds")
+                    >= stats["stage4"]["CycleDurationSeconds"]["q3"]
+                )
+                | (
+                    # Regla de patrón de crecimiento: al menos uno debe crecer
+                    ~((pl.col("delta_distance") > 0) | (pl.col("delta_duration") > 0))
+                )
+            )
+            .then(False)
+            .otherwise(True)
+            .alias("QualityData")
+        )
+
+        df_stage8 = df_stage8.with_columns(
+            pl.when(
+                (pl.col("FuelConsumed") <= stats["stage8"]["FuelConsumed"]["q1"])
+                | (pl.col("FuelConsumed") >= stats["stage8"]["FuelConsumed"]["q3"])
+                | (pl.col("Distance") <= stats["stage8"]["Distance"]["q1"])
+                | (pl.col("Distance") >= stats["stage8"]["Distance"]["q3"])
+                | (
+                    pl.col("CycleDurationSeconds")
+                    <= stats["stage8"]["CycleDurationSeconds"]["q1"]
+                )
+                | (
+                    pl.col("CycleDurationSeconds")
+                    >= stats["stage8"]["CycleDurationSeconds"]["q3"]
+                )
+                | (
+                    pl.col("TotalMeasuredTonnage")
+                    <= stats["stage8"]["TotalMeasuredTonnage"]["q1"]
+                )
+                | (
+                    pl.col("TotalMeasuredTonnage")
+                    >= stats["stage8"]["TotalMeasuredTonnage"]["q3"]
+                )
+                | (
+                    # Regla de patrón de crecimiento: al menos uno debe crecer
+                    ~(
+                        (pl.col("delta_distance") > 0)
+                        | (pl.col("delta_duration") > 0)
+                        | (pl.col("delta_tonnage") > 0)
+                    )
+                )
+            )
+            .then(False)
+            .otherwise(True)
+            .alias("QualityData")
+        )
+
+        concat_df = (
+            pl.concat([df_stage4, df_stage8])
+            .sort("cycle_group")
+            .drop(["delta_distance", "delta_duration", "delta_tonnage"])
+        )
+
+        return concat_df
 
     def prepare_data_for_stage(
         self,
@@ -559,8 +690,12 @@ class LinearRegressionModel:
         self.transform_cycles_data()
 
         # Separate data by stage for independent model training
-        stage_4_data = self.cycles_data.filter(pl.col("StageSequence") == 4)
-        stage_8_data = self.cycles_data.filter(pl.col("StageSequence") == 8)
+        stage_4_data = self.cycles_data.filter(
+            (pl.col("StageSequence") == 4) & pl.col("QualityData")
+        )
+        stage_8_data = self.cycles_data.filter(
+            (pl.col("StageSequence") == 8) & pl.col("QualityData")
+        )
 
         self.logger.info("Entrenando el modelo stage_4")
 

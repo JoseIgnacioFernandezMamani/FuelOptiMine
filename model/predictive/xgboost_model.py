@@ -92,8 +92,8 @@ class XGBoostModel:
         model = LinearRegressionModel()
         results = model.train_models()
         self.rmse_threshold = (
-            results["stage_4"]["train_metrics"]["rmse"]
-            + results["stage_8"]["train_metrics"]["rmse"]
+            results["stage_4"]["train_metrics"]["mae"]
+            + results["stage_8"]["train_metrics"]["mae"]
         ) / 2
         self.df = model.get_predictions()
 
@@ -692,7 +692,6 @@ class XGBoostModel:
                 "ShiftDate",
                 "Equipment",
                 "TruckFleet",
-                "MedianFuelLevelLiters",
                 "SpeedAvg",
                 "AvgSlopePercent",
                 "AvgAcceleration",
@@ -904,7 +903,7 @@ if __name__ == "__main__":
     ]
 
     # ✨ Todas las categóricas en una sola lista - XGBoost decide el mejor encoding
-    categorical_vars = ["Destination", "DestinationType"]
+    categorical_vars = ["Destination", "DestinationType", "Material", "Shovel"]
 
     # Crear modelo con soporte nativo
     model = XGBoostModel(

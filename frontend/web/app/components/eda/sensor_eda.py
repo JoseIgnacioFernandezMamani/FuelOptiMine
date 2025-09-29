@@ -13,7 +13,7 @@ DEV_MODE = True  # Change to False for production deployment
 # load data from database
 @st.cache_resource
 def get_analyzer():
-    analyzer = SensorDataEDA(truck_id="T-243")
+    analyzer = SensorDataEDA(truck_id="T-210")
     analyzer.run()
     return analyzer
 
@@ -63,7 +63,12 @@ def show():
             # Seleccionar variable a analizar
             grouping_option = st.selectbox(
                 "Seleccionar variable a analizar",
-                ["nivel de combustible", "delta de combustible", "velocidad", "RPM"],
+                [
+                    "nivel de combustible",
+                    "delta de combustible",
+                    "velocidad",
+                    "aceleración",
+                ],
                 index=0,  # Default is "nivel de combustible"
             )
 
@@ -87,11 +92,15 @@ def show():
                     "color": "#ff7f0e",
                 },
                 "velocidad": {
-                    "col": "Speed",
-                    "label": "Velocidad (km/h)",
+                    "col": "SpeedAvg",
+                    "label": "Velocidad Promedio (km/h)",
                     "color": "#2ca02c",
                 },
-                "RPM": {"col": "RPM", "label": "RPM", "color": "#d62728"},
+                "aceleración": {
+                    "col": "Acceleration",
+                    "label": "Aceleración (m/s²)",
+                    "color": "#d62728",
+                },
             }
 
             selected_var = variable_mapping[grouping_option]
