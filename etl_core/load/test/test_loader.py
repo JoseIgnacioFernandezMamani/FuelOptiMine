@@ -75,7 +75,7 @@ def process_single_truck(truck_id: str, dataset_name: str = "train_data") -> boo
         logger.info(f"{truck_id} - Cargando a ClickHouse")
 
         with ClickHouseLoader(max_tolerance_days=365) as loader:
-            success = loader.load(
+            success = loader.load_unified_data(
                 df_sensor=transformed_data["sensor"],
                 df_time_model=transformed_data["time_model"],
                 df_cycle=transformed_data["cycle"],
@@ -108,8 +108,9 @@ def process_single_truck(truck_id: str, dataset_name: str = "train_data") -> boo
 
 def run_all_trucks():
     """Ejecutar ETL para todos los camiones secuencialmente"""
-
+    # "T-210",
     truck_ids = [
+        "T-210",
         "T-233",
         "T-232",
         "T-231",

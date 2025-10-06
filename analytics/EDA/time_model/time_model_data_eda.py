@@ -35,7 +35,7 @@ class TimeModelDataEDA:
                 Status,
                 Category,
                 Event
-            FROM timemodel_table
+            FROM xgboost_fuel
             WHERE Equipment = '{self.truck_id}'
             AND TimeModelId IS NOT NULL
             ORDER BY TimeStamp_tm
@@ -54,8 +54,7 @@ class TimeModelDataEDA:
             self.timemodel_df = self.timemodel_df.with_columns(
                 [
                     # Duración de cada estado (diferencia con el siguiente timestamp)
-                    pl.col("TimeStamp_tm")
-                    .diff()
+                    (pl.col("TimeStamp_tm").shift(-1) - pl.col("TimeStamp_tm"))
                     .dt.total_seconds()
                     .alias("StateDurationSeconds"),
                     # Componentes temporales
@@ -64,7 +63,7 @@ class TimeModelDataEDA:
                     pl.col("TimeStamp_tm").dt.month().alias("Month"),
                     pl.col("TimeStamp_tm").dt.weekday().alias("Weekday"),
                     pl.col("TimeStamp_tm").dt.year().alias("Year"),
-                    # Shift aproximado (simplificado)
+                    # Shift aproximado
                     pl.when(pl.col("TimeStamp_tm").dt.hour().is_between(7, 19))
                     .then(pl.lit("D"))
                     .otherwise(pl.lit("N"))
@@ -100,89 +99,111 @@ class TimeModelDataEDA:
         stats = {}
         df = self.timemodel_df
 
-        for col in df.columns:
-            col_type = df.schema[col]
-            col_stats = {}
+        # Estadísticas de TimeModelId (solo conteo)
+        if "TimeModelId" in df.columns:
+            stats["TimeModelId"] = {
+                "type": "identifier",
+                "total_events": df["TimeModelId"].n_unique(),
+                "total_records": len(df),
+            }
 
-            # Variables categóricas
-            if col in self.categorical_cols or (
-                col_type == pl.Utf8 and col not in self.id_cols
-            ):
+        # Variables categóricas
+        for col in self.categorical_cols:
+            if col in df.columns:
                 value_counts = df[col].value_counts().sort("count", descending=True)
                 unique_count = df[col].n_unique()
                 total = len(df)
 
-                col_stats = {
+                stats[col] = {
                     "type": "categorical",
                     "unique_values": unique_count,
                     "total_records": total,
-                    "most_common": value_counts.head(10).to_dicts(),
+                    "top_10_values": value_counts.head(10).to_dicts(),
+                    "all_values": value_counts.to_dicts(),
                     "null_count": df[col].null_count(),
                     "null_percentage": (
                         (df[col].null_count() / total) * 100 if total > 0 else 0
                     ),
                 }
 
-            # Variables numéricas (duración)
-            elif col == "StateDurationSeconds":
-                # Filtrar valores válidos para estadísticas
-                valid_durations = df[col].drop_nulls()
+        # StateDurationSeconds (numérica derivada)
+        if "StateDurationSeconds" in df.columns:
+            valid_durations = df["StateDurationSeconds"].drop_nulls()
 
-                if len(valid_durations) > 0:
-                    col_stats = {
-                        "type": "numeric",
-                        "mean": valid_durations.mean(),
-                        "median": valid_durations.median(),
-                        "min": valid_durations.min(),
-                        "max": valid_durations.max(),
-                        "std_dev": valid_durations.std(),
-                        "q1": valid_durations.quantile(0.25),
-                        "q3": valid_durations.quantile(0.75),
-                        "p5": valid_durations.quantile(0.05),
-                        "p95": valid_durations.quantile(0.95),
-                        "valid_count": len(valid_durations),
-                        "null_count": df[col].null_count(),
-                    }
-
-            # Variables datetime
-            elif col_type in [pl.Datetime]:
-                min_date = df[col].min()
-                max_date = df[col].max()
-
-                col_stats = {
-                    "type": "datetime",
-                    "first_record": (
-                        min_date.strftime("%Y-%m-%d %H:%M:%S") if min_date else None
-                    ),
-                    "last_record": (
-                        max_date.strftime("%Y-%m-%d %H:%M:%S") if max_date else None
-                    ),
-                    "total_duration_days": (
-                        ((max_date - min_date).total_seconds() / 86400)
-                        if min_date and max_date
-                        else None
-                    ),
-                    "total_records": len(df),
+            if len(valid_durations) > 0:
+                stats["StateDurationSeconds"] = {
+                    "type": "numeric",
+                    "mean": valid_durations.mean(),
+                    "median": valid_durations.median(),
+                    "min": valid_durations.min(),
+                    "max": valid_durations.max(),
+                    "std_dev": valid_durations.std(),
+                    "q1": valid_durations.quantile(0.25),
+                    "q3": valid_durations.quantile(0.75),
+                    "p5": valid_durations.quantile(0.05),
+                    "p95": valid_durations.quantile(0.95),
+                    "valid_count": len(valid_durations),
+                    "null_count": df["StateDurationSeconds"].null_count(),
+                    "mean_minutes": valid_durations.mean() / 60,
+                    "mean_hours": valid_durations.mean() / 3600,
                 }
 
-            stats[col] = col_stats
+        # TimeStamp_tm
+        if "TimeStamp_tm" in df.columns:
+            min_date = df["TimeStamp_tm"].min()
+            max_date = df["TimeStamp_tm"].max()
+
+            stats["TimeStamp_tm"] = {
+                "type": "datetime",
+                "first_record": (
+                    min_date.strftime("%Y-%m-%d %H:%M:%S") if min_date else None
+                ),
+                "last_record": (
+                    max_date.strftime("%Y-%m-%d %H:%M:%S") if max_date else None
+                ),
+                "total_duration_days": (
+                    ((max_date - min_date).total_seconds() / 86400)
+                    if min_date and max_date
+                    else None
+                ),
+                "total_records": len(df),
+            }
+
+        # Distribuciones temporales
+        if "Hour" in df.columns:
+            stats["Hour_distribution"] = sorted(
+                df["Hour"].value_counts().to_dicts(), key=lambda x: x["Hour"]
+            )
+
+        if "Weekday" in df.columns:
+            stats["Weekday_distribution"] = sorted(
+                df["Weekday"].value_counts().to_dicts(), key=lambda x: x["Weekday"]
+            )
+
+        if "Month" in df.columns:
+            stats["Month_distribution"] = sorted(
+                df["Month"].value_counts().to_dicts(), key=lambda x: x["Month"]
+            )
+
+        if "Shift" in df.columns:
+            stats["Shift_distribution"] = df["Shift"].value_counts().to_dicts()
 
         self._stats_generated = True
         self._stats_cache = stats
         return stats
 
-    def get_state_transitions(self) -> pl.DataFrame:
+    def analyze_state_patterns(self) -> Dict[str, Any]:
         """
-        Analizar transiciones entre estados.
-        Muestra qué estado sigue a qué estado.
+        Análisis completo de patrones de estados.
         """
-        if not self._data_loaded:
-            raise RuntimeError("Primero ejecute run()")
+        df = self.timemodel_df
+        analysis = {}
 
-        transitions = self.timemodel_df.with_columns(
+        # 1. Transiciones de estados
+        transitions = df.with_columns(
             [
                 pl.col("Status").shift(-1).alias("NextStatus"),
-                pl.col("Category").shift(-1).alias("NextCategory"),
+                pl.col("StateDurationSeconds").alias("CurrentDuration"),
             ]
         ).filter(pl.col("NextStatus").is_not_null())
 
@@ -192,38 +213,26 @@ class TimeModelDataEDA:
             .sort("count", descending=True)
         )
 
-        # Calcular porcentajes
-        total = transition_counts["count"].sum()
+        total_transitions = transition_counts["count"].sum()
         transition_counts = transition_counts.with_columns(
-            [(pl.col("count") / total * 100).alias("percentage")]
+            [(pl.col("count") / total_transitions * 100).alias("percentage")]
         )
 
-        return transition_counts
+        analysis["state_transitions"] = {
+            "top_20_transitions": transition_counts.head(20).to_dicts(),
+            "total_unique_transitions": len(transition_counts),
+        }
 
-    def get_state_duration_analysis(self, state_col: str = "Status") -> pl.DataFrame:
-        """
-        Análisis de duración de estados/categorías/eventos.
-
-        Args:
-            state_col: 'Status', 'Category', o 'Event'
-        """
-        if not self._data_loaded:
-            raise RuntimeError("Primero ejecute run()")
-
-        if state_col not in self.categorical_cols:
-            raise ValueError(f"'{state_col}' debe ser una de: {self.categorical_cols}")
-
-        duration_analysis = (
-            self.timemodel_df.filter(pl.col("StateDurationSeconds").is_not_null())
-            .group_by(state_col)
+        # 2. Duración por estado
+        duration_by_status = (
+            df.filter(pl.col("StateDurationSeconds").is_not_null())
+            .group_by("Status")
             .agg(
                 [
                     pl.count().alias("occurrences"),
                     pl.col("StateDurationSeconds").sum().alias("total_seconds"),
                     pl.col("StateDurationSeconds").mean().alias("avg_seconds"),
                     pl.col("StateDurationSeconds").median().alias("median_seconds"),
-                    pl.col("StateDurationSeconds").min().alias("min_seconds"),
-                    pl.col("StateDurationSeconds").max().alias("max_seconds"),
                     pl.col("StateDurationSeconds").std().alias("std_seconds"),
                 ]
             )
@@ -231,83 +240,156 @@ class TimeModelDataEDA:
                 [
                     (pl.col("total_seconds") / 3600).alias("total_hours"),
                     (pl.col("avg_seconds") / 60).alias("avg_minutes"),
-                    (pl.col("median_seconds") / 60).alias("median_minutes"),
                 ]
             )
             .sort("total_hours", descending=True)
         )
 
-        return duration_analysis
+        analysis["duration_by_status"] = duration_by_status.to_dicts()
 
-    def get_temporal_distribution(
-        self, state_col: str = "Status", time_group: str = "hour"
-    ) -> pl.DataFrame:
-        """
-        Distribución temporal de estados.
+        # 3. Duración por categoría
+        duration_by_category = (
+            df.filter(pl.col("StateDurationSeconds").is_not_null())
+            .group_by("Category")
+            .agg(
+                [
+                    pl.count().alias("occurrences"),
+                    pl.col("StateDurationSeconds").sum().alias("total_seconds"),
+                    pl.col("StateDurationSeconds").mean().alias("avg_seconds"),
+                ]
+            )
+            .with_columns([(pl.col("total_seconds") / 3600).alias("total_hours")])
+            .sort("total_hours", descending=True)
+        )
 
-        Args:
-            state_col: Columna a analizar ('Status', 'Category', 'Event')
-            time_group: 'hour', 'weekday', 'month', 'shift'
-        """
-        if not self._data_loaded:
-            raise RuntimeError("Primero ejecute run()")
+        analysis["duration_by_category"] = duration_by_category.to_dicts()
 
-        time_mapping = {
-            "hour": "Hour",
-            "weekday": "Weekday",
-            "month": "Month",
-            "shift": "Shift",
+        # 4. Eventos más frecuentes
+        event_frequency = (
+            df.group_by(["Category", "Event"])
+            .agg([pl.count().alias("occurrences")])
+            .sort("occurrences", descending=True)
+        )
+
+        analysis["event_frequency"] = {
+            "top_20_events": event_frequency.head(20).to_dicts(),
+            "total_unique_events": len(event_frequency),
         }
 
-        group_col = time_mapping.get(time_group, "Hour")
+        # 5. Estados más largos registrados
+        longest_states = (
+            df.filter(pl.col("StateDurationSeconds").is_not_null())
+            .select(
+                [
+                    "TimeStamp_tm",
+                    "Status",
+                    "Category",
+                    "Event",
+                    "StateDurationSeconds",
+                ]
+            )
+            .with_columns(
+                [(pl.col("StateDurationSeconds") / 3600).alias("DurationHours")]
+            )
+            .sort("StateDurationSeconds", descending=True)
+            .head(20)
+        )
 
-        distribution = (
-            self.timemodel_df.group_by([group_col, state_col])
+        analysis["longest_states"] = longest_states.to_dicts()
+
+        return analysis
+
+    def analyze_temporal_patterns(self) -> Dict[str, Any]:
+        """
+        Análisis de patrones temporales.
+        """
+        df = self.timemodel_df
+        analysis = {}
+
+        # 1. Distribución por hora del día
+        hourly_status = (
+            df.group_by(["Hour", "Status"])
+            .agg([pl.count().alias("count")])
+            .sort(["Hour", "count"], descending=[False, True])
+        )
+
+        analysis["hourly_status_distribution"] = hourly_status.to_dicts()
+
+        # 2. Distribución por día de la semana
+        weekday_status = (
+            df.group_by(["Weekday", "Status"])
+            .agg([pl.count().alias("count")])
+            .sort(["Weekday", "count"], descending=[False, True])
+        )
+
+        analysis["weekday_status_distribution"] = weekday_status.to_dicts()
+
+        # 3. Distribución por turno
+        shift_status = (
+            df.group_by(["Shift", "Status"])
             .agg(
                 [
                     pl.count().alias("count"),
+                    pl.col("StateDurationSeconds").sum().alias("total_duration"),
+                ]
+            )
+            .sort(["Shift", "count"], descending=[False, True])
+        )
+
+        analysis["shift_status_distribution"] = shift_status.to_dicts()
+
+        # 4. Resumen diario
+        daily_summary = (
+            df.group_by("Date")
+            .agg(
+                [
+                    pl.count().alias("total_events"),
+                    pl.col("Status").n_unique().alias("unique_statuses"),
                     pl.col("StateDurationSeconds")
                     .sum()
                     .alias("total_duration_seconds"),
                 ]
             )
-            .sort([group_col, "count"], descending=[False, True])
-        )
-
-        # Agregar porcentaje por grupo temporal
-        total_by_time = distribution.group_by(group_col).agg(
-            [pl.col("count").sum().alias("time_total")]
-        )
-
-        distribution = (
-            distribution.join(total_by_time, on=group_col)
             .with_columns(
-                [(pl.col("count") / pl.col("time_total") * 100).alias("percentage")]
+                [(pl.col("total_duration_seconds") / 3600).alias("total_hours")]
             )
-            .drop("time_total")
+            .sort("Date")
         )
 
-        return distribution
+        analysis["daily_summary"] = daily_summary.to_dicts()
 
-    def get_uptime_downtime_analysis(self) -> Dict[str, Any]:
+        # 5. Eventos por mes
+        monthly_events = (
+            df.group_by("Month").agg([pl.count().alias("total_events")]).sort("Month")
+        )
+
+        analysis["monthly_events"] = monthly_events.to_dicts()
+
+        return analysis
+
+    def analyze_uptime_downtime(
+        self, operational_statuses: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
         """
         Análisis de tiempo operativo vs no operativo.
-        Requiere definir qué estados son "operativos" según tu negocio.
         """
         if not self._data_loaded:
             raise RuntimeError("Primero ejecute run()")
 
         df = self.timemodel_df
 
-        # Estados operativos comunes (ajustar según tu caso)
-        operational_statuses = [
-            "Operating",
-            "Running",
-            "Active",
-            "Working",
-            "Loaded",
-            "Empty",
-        ]
+        # Estados operativos por defecto (personalizar según necesidad)
+        if operational_statuses is None:
+            operational_statuses = [
+                "Operating",
+                "Running",
+                "Active",
+                "Working",
+                "Loaded",
+                "Empty",
+                "Hauling",
+                "Loading",
+            ]
 
         # Clasificar estados
         classified = df.with_columns(
@@ -340,6 +422,23 @@ class TimeModelDataEDA:
         uptime_hours = uptime_row["total_hours"][0] if len(uptime_row) > 0 else 0
         downtime_hours = downtime_row["total_hours"][0] if len(downtime_row) > 0 else 0
 
+        # Distribución de downtime por status
+        downtime_by_status = (
+            classified.filter(
+                (pl.col("TimeType") == "Downtime")
+                & (pl.col("StateDurationSeconds").is_not_null())
+            )
+            .group_by("Status")
+            .agg(
+                [
+                    pl.count().alias("occurrences"),
+                    pl.col("StateDurationSeconds").sum().alias("total_seconds"),
+                ]
+            )
+            .with_columns([(pl.col("total_seconds") / 3600).alias("total_hours")])
+            .sort("total_hours", descending=True)
+        )
+
         return {
             "total_hours": float(total_hours),
             "uptime_hours": float(uptime_hours),
@@ -351,85 +450,47 @@ class TimeModelDataEDA:
                 (downtime_hours / total_hours * 100) if total_hours > 0 else 0
             ),
             "summary": time_summary.to_dicts(),
+            "downtime_by_status": downtime_by_status.to_dicts(),
         }
 
-    def get_event_frequency_analysis(self) -> pl.DataFrame:
+    def analyze_category_event_relationship(self) -> Dict[str, Any]:
         """
-        Análisis de frecuencia de eventos.
-        Útil para identificar eventos recurrentes o problemáticos.
+        Análisis de relación entre categorías y eventos.
         """
-        if not self._data_loaded:
-            raise RuntimeError("Primero ejecute run()")
+        df = self.timemodel_df
+        analysis = {}
 
-        event_freq = (
-            self.timemodel_df.group_by(["Category", "Event"])
+        # 1. Eventos por categoría
+        events_per_category = (
+            df.group_by(["Category", "Event"])
             .agg(
                 [
                     pl.count().alias("occurrences"),
                     pl.col("StateDurationSeconds").mean().alias("avg_duration_seconds"),
                 ]
             )
-            .with_columns(
-                [(pl.col("avg_duration_seconds") / 60).alias("avg_duration_minutes")]
-            )
-            .sort("occurrences", descending=True)
+            .sort(["Category", "occurrences"], descending=[False, True])
         )
 
-        return event_freq
+        analysis["events_per_category"] = events_per_category.to_dicts()
 
-    def get_longest_states(self, top_n: int = 20) -> pl.DataFrame:
-        """
-        Identificar los estados más largos registrados.
-        Útil para detectar anomalías o periodos críticos.
-        """
-        if not self._data_loaded:
-            raise RuntimeError("Primero ejecute run()")
-
-        longest = (
-            self.timemodel_df.filter(pl.col("StateDurationSeconds").is_not_null())
-            .select(
-                [
-                    "TimeStamp_tm",
-                    "Status",
-                    "Category",
-                    "Event",
-                    "StateDurationSeconds",
-                    "Shift",
-                    "Date",
-                ]
-            )
-            .with_columns(
-                [(pl.col("StateDurationSeconds") / 3600).alias("DurationHours")]
-            )
-            .sort("StateDurationSeconds", descending=True)
-            .head(top_n)
+        # 2. Categorías más frecuentes por Status
+        status_category = (
+            df.group_by(["Status", "Category"])
+            .agg([pl.count().alias("occurrences")])
+            .sort(["Status", "occurrences"], descending=[False, True])
         )
 
-        return longest
+        analysis["status_category_relationship"] = status_category.to_dicts()
 
-    def get_daily_summary(self) -> pl.DataFrame:
-        """
-        Resumen diario de estados y tiempo.
-        """
-        if not self._data_loaded:
-            raise RuntimeError("Primero ejecute run()")
+        # 3. Matriz de frecuencia Status-Category
+        status_list = df["Status"].unique().to_list()
+        category_list = df["Category"].unique().to_list()
 
-        daily = (
-            self.timemodel_df.filter(pl.col("StateDurationSeconds").is_not_null())
-            .group_by("Date")
-            .agg(
-                [
-                    pl.count().alias("total_events"),
-                    pl.col("Status").n_unique().alias("unique_statuses"),
-                    pl.col("StateDurationSeconds").sum().alias("total_seconds"),
-                    pl.col("StateDurationSeconds").mean().alias("avg_event_duration"),
-                ]
-            )
-            .with_columns([(pl.col("total_seconds") / 3600).alias("total_hours")])
-            .sort("Date")
-        )
+        analysis["unique_statuses"] = status_list
+        analysis["unique_categories"] = category_list
 
-        return daily
+        return analysis
 
     def run(self):
         """Ejecutar análisis completo"""
@@ -455,54 +516,3 @@ class TimeModelDataEDA:
                 self.client.close()
             except Exception as e:
                 logging.warning(f"Error cerrando conexión: {e}")
-
-
-if __name__ == "__main__":
-    # Ejemplo de uso
-    eda = TimeModelDataEDA(truck_id="T-243")
-    eda.run()
-
-    df = eda.get_dataframe()
-    stats = eda.get_statistics()
-
-    print("=" * 60)
-    print("ESTADÍSTICAS GENERALES")
-    print("=" * 60)
-    print(f"Total de registros: {len(df)}")
-    print(f"\nEstados únicos: {df['Status'].n_unique()}")
-    print(f"Categorías únicas: {df['Category'].n_unique()}")
-    print(f"Eventos únicos: {df['Event'].n_unique()}")
-
-    print("\n" + "=" * 60)
-    print("ANÁLISIS DE DURACIÓN POR ESTADO")
-    print("=" * 60)
-    duration_by_status = eda.get_state_duration_analysis("Status")
-    print(duration_by_status)
-
-    print("\n" + "=" * 60)
-    print("TRANSICIONES DE ESTADO MÁS COMUNES")
-    print("=" * 60)
-    transitions = eda.get_state_transitions()
-    print(transitions.head(10))
-
-    print("\n" + "=" * 60)
-    print("ANÁLISIS UPTIME/DOWNTIME")
-    print("=" * 60)
-    uptime_analysis = eda.get_uptime_downtime_analysis()
-    print(f"Total horas: {uptime_analysis['total_hours']:.2f}")
-    print(f"Uptime: {uptime_analysis['uptime_percentage']:.2f}%")
-    print(f"Downtime: {uptime_analysis['downtime_percentage']:.2f}%")
-
-    print("\n" + "=" * 60)
-    print("EVENTOS MÁS FRECUENTES")
-    print("=" * 60)
-    event_freq = eda.get_event_frequency_analysis()
-    print(event_freq.head(10))
-
-    print("\n" + "=" * 60)
-    print("ESTADOS MÁS LARGOS")
-    print("=" * 60)
-    longest = eda.get_longest_states(top_n=10)
-    print(longest)
-
-    eda.close()

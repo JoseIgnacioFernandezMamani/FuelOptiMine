@@ -32,7 +32,8 @@ class ClickHouseLoader:
         # Umbrales de memoria en MB (bajo, medio, alto)
         self.mem_thresholds = [128, 512, 1024]
         # Tabla destino unificada
-        self.TARGET_TABLE = "xgboost_fuel"
+        self.XGBOOST_TABLE = "xgboost_fuel"
+        self.FUEL_SUPPLY_TABLE = "fuel_supply"
         # Tolerancia máxima para unificación de datos
         self.max_tolerance_days = max_tolerance_days
 
@@ -47,7 +48,7 @@ class ClickHouseLoader:
         """Connects to the ClickHouse client using configured parameters"""
         self.client = create_client(params=self.params, logger=self.logger)
 
-    def load(
+    def load_unified_data(
         self,
         df_sensor: pl.DataFrame,
         df_time_model: pl.DataFrame,
@@ -62,7 +63,7 @@ class ClickHouseLoader:
 
             if unified_df.is_empty():
                 self.logger.warning(
-                    f"Intento de carga vacía en tabla {self.TARGET_TABLE}"
+                    f"Intento de carga vacía en tabla {self.XGBOOST_TABLE}"
                 )
                 return False
 
@@ -77,7 +78,7 @@ class ClickHouseLoader:
             self.logger.info(f"Batch size calculado: {batch_size}")
 
             # 3. Load via Arrow streaming
-            full_table_name = f"{self.params['database']}.{self.TARGET_TABLE}"
+            full_table_name = f"{self.params['database']}.{self.XGBOOST_TABLE}"
             self.client.insert_arrow(
                 table=full_table_name,
                 arrow_table=unified_df.to_arrow(),
@@ -95,8 +96,45 @@ class ClickHouseLoader:
 
         except Exception as e:
             self.logger.exception(
-                f"Error cargando datos en {self.TARGET_TABLE}: {str(e)}"
+                f"Error cargando datos en {self.XGBOOST_TABLE}: {str(e)}"
             )
+            raise
+
+    def load_fuel_supply_data(self, df: pl.DataFrame):
+        """loader for fuel_supply table"""
+        try:
+            if df.is_empty():
+                self.logger.warning(f"Intento de carga vacía en tabla fuel_supply")
+                return False
+
+            start_time = time.monotonic()
+
+            # 1. Type optimization
+            df = self.optimize_types(df)
+
+            # 2. Dynamic batch size calculation
+            batch_size = self.calculate_batch_size(df)
+            self.logger.info(f"Batch size calculado: {batch_size}")
+
+            # 3. Load via Arrow streaming
+            full_table_name = f"{self.params['database']}.{self.FUEL_SUPPLY_TABLE}"
+            self.client.insert_arrow(
+                table=full_table_name,
+                arrow_table=df.to_arrow(),
+                settings={"max_insert_block_size": batch_size},
+            )
+
+            # 4. Metrics update
+            duration = time.monotonic() - start_time
+            self.update_metrics(len(df), duration)
+
+            self.logger.info(
+                f"Cargados {len(df)} registros en {full_table_name} en {duration:.2f}s"
+            )
+            return True
+
+        except Exception as e:
+            self.logger.exception(f"Error cargando datos en fuel_supply: {str(e)}")
             raise
 
     def optimize_types(self, df: pl.DataFrame) -> pl.DataFrame:
@@ -162,7 +200,7 @@ class ClickHouseLoader:
     def get_table_info(self) -> Dict[str, Any]:
         """Returns information about the target table"""
         try:
-            full_table_name = f"{self.params['database']}.{self.TARGET_TABLE}"
+            full_table_name = f"{self.params['database']}.{self.XGBOOST_TABLE}"
 
             # Obtener información de la tabla
             table_info = self.client.command(f"DESCRIBE TABLE {full_table_name}")
@@ -192,6 +230,6 @@ class ClickHouseLoader:
         """Returns accumulated performance metrics"""
         return {
             **self.metrics,
-            "target_table": self.TARGET_TABLE,
+            "target_table": self.XGBOOST_TABLE,
             "max_tolerance_days": self.max_tolerance_days,
         }

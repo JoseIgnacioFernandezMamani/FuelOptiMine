@@ -106,3 +106,8 @@ clickhouse/*.tar.gz
 *.dll
 *.so
 *.dylib
+
+# mlflow
+mlflow_server/backend/
+mlflow_server/artifacts/
+mlflow_server/logs/

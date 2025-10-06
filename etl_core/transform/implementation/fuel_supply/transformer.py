@@ -67,7 +67,7 @@ class FuelSupplyTransformer(BaseTransformer):
             )
         )
 
-        # 3. Filtrar por validaciones de dominio
+        # 3. Filter by domain validations
         df = self._apply_domain_filters(df)
 
         # 4. Actualizar métricas finales
@@ -76,7 +76,12 @@ class FuelSupplyTransformer(BaseTransformer):
             self.metrics["final_data_percentage"] = round(
                 (df.height / self.metrics["initial_records"]) * 100, 2
             )
-        return df.sort(["ShiftDate", "TimeStamp"])
+
+        df = df.sort(["ShiftDate", "TimeStamp"])
+
+        # Add autoincremental column FuelSupplyId from 1 to N
+        df = df.with_columns(pl.arange(1, df.height + 1).alias("FuelSupplyId"))
+        return df
 
     def _get_outlier_handling_exprs(self) -> List[pl.Expr]:
         """Convertir valores fuera de rango a nulos"""

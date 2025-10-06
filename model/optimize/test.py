@@ -2,27 +2,31 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn import linear_model
 
+
 # ==========================
 # 1. Datos
 # ==========================
 y = np.array(
     [
-        1015.67,
-        994.23,
-        991.67,
-        994.23,
-        999.67,
-        991.67,
-        988.79,
-        991.67,
-        978.23,
-        986.23,
-        999.67,
-        986.23,
-        994.23,
-        1015.67,
-        994.23,
-        1015.67,
+        1809.6,
+        2091.2,
+        2402.24,
+        2631.04,
+        3004.48,
+        2990.4,
+        3004.48,
+        2990.4,
+        2985.6,
+        3000.96,
+        2985.6,
+        3000.96,
+        2985.6,
+        2997.44,
+        3000.96,
+        2985.6,
+        3004.48,
+        2990.4,
+        3004.48,
     ]
 )
 
@@ -75,12 +79,12 @@ plt.plot(
     line_y_ransac,
     color="cornflowerblue",
     linewidth=2,
-    label="RANSAC Regression",
+    label="theil Regression",
 )
 plt.scatter(
     [1, len(y)], [pred_inicio, pred_fin], color="red", zorder=5, label="Predicciones"
 )
-plt.title("Predicción con RANSAC")
+plt.title("Predicción con theil")
 plt.xlabel("Índice")
 plt.ylabel("Valor")
 plt.legend()

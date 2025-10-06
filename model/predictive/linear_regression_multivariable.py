@@ -20,7 +20,7 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 import logging
 import datetime
 
-from model.utils.model_utils import analyze_multicollinearity, log_results, get_logger
+from model.utils.model_utils import log_results, get_logger
 from etl_core.load.utils.config import CH_CONFIG, create_client
 import sys
 import warnings
@@ -32,7 +32,7 @@ class LinearRegressionModel:
     Clase simplificada para regresión lineal con dos modelos: Stage 4 y Stage 8
     """
 
-    def __init__(self):
+    def __init__(self, truck_id: str):
         self.cycles_data: pl.DataFrame = pl.DataFrame()
         self.predictor_vars: list[str] = [
             "Distance",
@@ -62,9 +62,17 @@ class LinearRegressionModel:
         self.df: pl.DataFrame = pl.DataFrame()
 
         # self.logger
-        self.logger = get_logger("LinearRegression", "lrm.log", console=True)
+        self.logger = get_logger("LinearRegression", "lrm.log", console=False)
 
-    def load_data(self, truck_id: str = "T-210"):
+        # self total consumed
+        self.total_consumed: float = 0.0
+
+        # stage 1 fuel consumed estimated
+        self.st1_fuel_consumed: float = 0.0
+        # truck id
+        self.truck_id = truck_id
+
+    def load_data(self):
         """
         Load data from ClickHouse or CSV file.
 
@@ -72,13 +80,13 @@ class LinearRegressionModel:
             truck_id: ID del camión específico (ej: 'T-210'). Si None, carga todos los camiones
             from_clickhouse: Si True carga desde ClickHouse, si False desde CSV
         """
-        self.logger.info(f"Cargando datos desde ClickHouse para {truck_id}")
+        self.logger.info(f"Cargando datos desde ClickHouse para {self.truck_id}")
         client = create_client(CH_CONFIG, self.logger)
 
         query = f"""
         SELECT *
         FROM {CH_CONFIG['database']}.xgboost_fuel
-        WHERE Equipment = '{truck_id}'
+        WHERE Equipment = '{self.truck_id}'
         ORDER BY SortTimestamp
         """
 
@@ -92,6 +100,11 @@ class LinearRegressionModel:
 
         # Convertir a polars
         self.df = pl.from_pandas(df_pandas)
+
+        # get total consumed fuel
+        self.total_consumed = self.df.select(pl.col("DeltaFuel").sum()).item()
+
+        # get stage 1 consumed fuel estimated
 
         client.close()
 
@@ -111,7 +124,27 @@ class LinearRegressionModel:
             return max(0.0, fuel_levels[0] - fuel_levels[-1])
 
         try:
-            y = np.array(fuel_levels, dtype=np.float64)
+            # Filtrar valores <= 0 y limpiar repetidos excesivos
+            valid_fuel_levels = []
+            consecutive_count = 0
+            last_value = None
+
+            for v in fuel_levels:
+                if v > 0:  # Ignorar valores <= 0
+                    if v == last_value:
+                        consecutive_count += 1
+                        # Solo mantener hasta 3 valores consecutivos repetidos
+                        if consecutive_count <= 3:
+                            valid_fuel_levels.append(v)
+                    else:
+                        consecutive_count = 1
+                        last_value = v
+                        valid_fuel_levels.append(v)
+            y = np.array(valid_fuel_levels, dtype=np.float64)
+
+            if len(y) < 3:
+                return max(0.0, fuel_levels[0] - fuel_levels[-1])
+
             X = np.arange(1, len(y) + 1).reshape(-1, 1)
 
             # Theil-Sen Regressor - robust and stable
@@ -231,6 +264,7 @@ class LinearRegressionModel:
                     pl.len().alias(
                         "RecordsInCycle"
                     ),  # numero de registros de sensor, metadato
+                    pl.col("StageSequence").sum().alias("StageSum"),  # columna temporal
                     pl.col("TimeStampIni").last().alias("TimeStampIni"),
                     pl.col("TimeStampFin").last().alias("TimeStampFin"),
                     pl.col("ShiftDate").last().alias("ShiftDate"),
@@ -242,9 +276,14 @@ class LinearRegressionModel:
                     # variables para calculo, consumo de combustible
                     pl.col("MedianFuelLevelLiters").alias("FuelLevelsList"),
                     # variables numericas para modelo
-                    pl.col("SpeedAvg").mean().alias("SpeedAvg"),
-                    pl.col("SlopePercent").mean().alias("AvgSlopePercent"),
-                    pl.col("Acceleration").mean().alias("AvgAcceleration"),
+                    (
+                        pl.col("SpeedAvg")
+                        .filter(pl.col("SpeedAvg") > 5)
+                        .median()
+                        .fill_null(pl.col("SpeedAvg").median())
+                    ).alias("SpeedAvg"),
+                    pl.col("SlopePercent").median().alias("AvgSlopePercent"),
+                    pl.col("Acceleration").median().alias("AvgAcceleration"),
                     pl.col("TimeEfficiencyPercentage")
                     .sum()
                     .alias("TimeEfficiencyPercentage"),
@@ -264,6 +303,11 @@ class LinearRegressionModel:
             )
             .sort("cycle_group")
         )
+
+        result = result.filter(
+            (pl.col("StageSum") == 9) & (pl.col("StageSequence") == 4)
+            | (pl.col("StageSum") == 26) & (pl.col("StageSequence") == 8)
+        ).drop("StageSum")
 
         # obtener los verdaderos timestamps de inicio y fin del ciclo
         result = result.with_columns(
@@ -356,6 +400,26 @@ class LinearRegressionModel:
             pl.col("Shovel").fill_null(pl.lit("Unknown")).alias("Shovel"),
         )
 
+        # calcular el consumo de stage 1
+        st1 = (
+            result.filter(pl.col("StageSequence") == 1)
+            .with_columns(
+                pl.col("FuelLevelsList").list.first().alias("StartFuel"),
+                pl.col("FuelLevelsList").list.last().alias("EndFuel"),
+            )
+            .with_columns(
+                pl.when(
+                    (pl.col("StartFuel") - pl.col("EndFuel") < 30)
+                    & (pl.col("StartFuel") - pl.col("EndFuel") >= 0)
+                )
+                .then(pl.col("StartFuel") - pl.col("EndFuel"))
+                .otherwise(0)
+                .alias("aux")
+            )
+        )
+        self.st1_fuel_consumed = st1.select(pl.col("aux")).sum().item()
+
+        # solo obtener ciclos de carguio 4 y acarreo 8
         result = result.filter(
             (
                 (pl.col("StageSequence").is_in([4, 8]))
@@ -363,7 +427,7 @@ class LinearRegressionModel:
             )
         )
 
-        # calcular combustible consumido usando RANSAC simplificado
+        # calcular combustible consumido usando theil simplificado
         result = result.with_columns(
             [
                 pl.col("FuelLevelsList")
@@ -762,9 +826,6 @@ class LinearRegressionModel:
                 "test_metrics": self.calculate_metrics(
                     stage_4_scaled_data["y_test"], y_pred_test_4
                 ),
-                "model_parameters": self.inverse_scale(
-                    self.model_stage_4, self.scaler_stage_4
-                ),
                 "outlier_info": stage_4_scaled_data["outlier_info"],
             },
             "stage_8": {
@@ -781,11 +842,10 @@ class LinearRegressionModel:
                 "test_metrics": self.calculate_metrics(
                     stage_8_scaled_data["y_test"], y_pred_test_8
                 ),
-                "model_parameters": self.inverse_scale(
-                    self.model_stage_8, self.scaler_stage_8
-                ),
                 "outlier_info": stage_8_scaled_data["outlier_info"],
             },
+            "total_consumed_fuel": self.total_consumed,
+            "stage 1 fuel consumed": self.st1_fuel_consumed,
         }
 
         log_results(self.predictor_vars, "all", result, self.logger)

@@ -1,6 +1,5 @@
 CREATE_TABLE_XGBOOST_FUEL = """
 -- =================================================================
--- TABLA XGBOOST_FUEL CON COMENTARIOS COMPLETOS EN ESPAÑOL
 -- Tabla para entrenamiento de modelo XGBoost de predicción de consumo de combustible
 -- =================================================================
 
@@ -174,7 +173,7 @@ CREATE TABLE IF NOT EXISTS fuel_optimine.xgboost_fuel
         COMMENT 'Timestamp unificado para ordenamiento de registros, toma el registro de tiempo minimo entre TimeStamp de sensores, TimeStampInicio y TimeStampFin de cyclos y TimeStamp_tm del modelo de tiempos.'
         CODEC(Delta(8), ZSTD(1)),
 
-    -- Índices para optimización de consultas del modelo xgboost
+    -- Indexes for query optimization of the xgboost model
     INDEX idx_equipment Equipment TYPE set(0) GRANULARITY 4,
     INDEX idx_truck_fleet TruckFleet TYPE set(0) GRANULARITY 4,
     INDEX idx_time_model_id TimeModelId TYPE bloom_filter GRANULARITY 2,

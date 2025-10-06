@@ -66,10 +66,11 @@ class SensorDataEDA:
             self.sensor_df = self.sensor_df.sort("TimeStamp")
 
             self.sensor_df = self.sensor_df.with_columns(
-                pl.col("FuelLevelLiters").diff().alias("DeltaFuel"),
+                pl.col("FuelLevelLiters").diff().alias("DeltaFuelLevelLiters"),
                 pl.col("TimeStamp").diff().dt.total_seconds().alias("TimeDiffSeconds"),
             )
 
+            # filter out negative fuel levels
             self.sensor_df = self.sensor_df.filter(pl.col("FuelLevelLiters") >= 0)
 
             self._data_loaded = True
@@ -225,3 +226,189 @@ class SensorDataEDA:
                 self.client.close()
             except Exception as e:
                 logging.warning(f"Error cerrando conexión: {e}")
+
+    def get_correlation_matrix(self, min_std: float = 1e-6) -> Dict[str, Any]:
+        """
+        Calcula la matriz de correlación para las columnas especificadas.
+
+        Args:
+            columns: Lista de columnas a incluir. Si es None, usa variables predeterminadas.
+
+        Returns:
+            Dict con 'columns', 'matrix' (lista de listas), y 'pairs' (pares ordenados)
+        """
+        if not self._data_loaded:
+            raise RuntimeError("Primero ejecute run()")
+
+        # Columnas predeterminadas si no se especifican
+        candidate_columns = [
+            "FuelLevelLiters",
+            "SpeedAvg",
+            "Acceleration",
+            "SlopePercent",
+            "TimeDiffSeconds",
+            "DeltaFuel",
+        ]
+
+        valid_columns = []
+        excluded_columns = []
+
+        for col in candidate_columns:
+            if col not in self.sensor_df.columns:
+                excluded_columns.append(
+                    {"column": col, "reason": "No existe en el dataset"}
+                )
+                continue
+
+            # Calcular estadísticas básicas
+            std_val = self.sensor_df[col].std()
+            null_count = self.sensor_df[col].null_count()
+            total_count = len(self.sensor_df)
+
+            # Verificar si la columna es válida para correlación
+            if std_val is None or std_val < min_std:
+                excluded_columns.append(
+                    {
+                        "column": col,
+                        "reason": f"Baja varianza (std={std_val:.2e} < {min_std:.2e})",
+                    }
+                )
+            elif null_count / total_count > 0.5:  # Más del 50% nulos
+                excluded_columns.append(
+                    {
+                        "column": col,
+                        "reason": f"Demasiados nulos ({null_count}/{total_count})",
+                    }
+                )
+            else:
+                valid_columns.append(col)
+
+        if len(valid_columns) < 2:
+            raise ValueError(
+                f"Se necesitan al menos 2 columnas numéricas válidas. "
+                f"Válidas: {valid_columns}, Excluidas: {excluded_columns}"
+            )
+
+        # Calcular matriz de correlación solo con columnas válidas
+        corr_matrix = []
+        for col1 in valid_columns:
+            row = []
+            for col2 in valid_columns:
+                try:
+                    corr_val = self.sensor_df.select(
+                        pl.corr(col1, col2).alias("corr")
+                    ).item()
+                    # Reemplazar nan con 0.0
+                    row.append(
+                        corr_val
+                        if corr_val is not None and not np.isnan(corr_val)
+                        else 0.0
+                    )
+                except Exception:
+                    row.append(0.0)
+            corr_matrix.append(row)
+
+        # Crear lista de pares con correlación
+        pairs = []
+        for i, col1 in enumerate(valid_columns):
+            for j, col2 in enumerate(valid_columns):
+                if i < j:
+                    corr_value = corr_matrix[i][j]
+                    pairs.append(
+                        {
+                            "var1": col1,
+                            "var2": col2,
+                            "correlation": corr_value,
+                            "abs_correlation": abs(corr_value),
+                        }
+                    )
+
+        # Ordenar por correlación absoluta descendente
+        pairs.sort(key=lambda x: x["abs_correlation"], reverse=True)
+
+        return {
+            "columns": valid_columns,
+            "matrix": corr_matrix,
+            "pairs": pairs,
+            "excluded_columns": excluded_columns,  # Información de diagnóstico
+        }
+
+    def analyze_refuel_events(self) -> Dict[str, Any]:
+        """
+        Analiza los eventos de recarga identificando:
+        - Cantidad de recargas
+        - Volumen promedio por recarga
+        - Distribución temporal
+        - Validación de recargas
+
+        Returns:
+            Dict con estadísticas y DataFrames de eventos de recarga
+        """
+        if not self._data_loaded:
+            raise RuntimeError("Primero ejecute run()")
+
+        refuels = self.sensor_df.filter(
+            (pl.col("DeltaFuel").is_not_null()) & (pl.col("DeltaFuel") > 0)
+        ).select(
+            [
+                "TimeStamp",
+                "ShiftDate",
+                "Shift",
+                "DeltaFuel",
+                "ValidFuel",
+                "BeforeAvg",
+                "AfterAvg",
+            ]
+        )
+
+        if refuels.is_empty():
+            return {
+                "total_refuels": 0,
+                "message": "No se encontraron eventos de recarga",
+            }
+
+        # Calcular estadísticas
+        total_refuels = len(refuels)
+        total_volume = refuels.select("DeltaFuel").sum().item()
+        avg_volume = refuels.select("DeltaFuel").mean().item()
+        median_volume = refuels.select("DeltaFuel").median().item()
+
+        # Distribución por turno
+        by_shift = refuels.group_by("Shift").agg(
+            [
+                pl.count().alias("count"),
+                pl.col("DeltaFuel").sum().alias("total_volume"),
+                pl.col("DeltaFuel").mean().alias("avg_volume"),
+            ]
+        )
+
+        # Distribución temporal (por mes)
+        by_month = (
+            refuels.with_columns(
+                pl.col("TimeStamp").dt.month().alias("Month"),
+                pl.col("TimeStamp").dt.year().alias("Year"),
+            )
+            .group_by(["Year", "Month"])
+            .agg(
+                [
+                    pl.count().alias("count"),
+                    pl.col("DeltaFuel").sum().alias("total_volume"),
+                ]
+            )
+            .sort(["Year", "Month"])
+        )
+
+        # Análisis de consistencia: diferencia entre AfterAvg y ValidFuel
+        consistency = refuels.with_columns(
+            (pl.col("AfterAvg") - pl.col("ValidFuel")).abs().alias("difference")
+        )
+
+        return {
+            "total_volume_liters": float(total_volume) if total_volume else 0,
+            "avg_volume_liters": float(avg_volume) if avg_volume else 0,
+            "median_volume_liters": float(median_volume) if median_volume else 0,
+            "valid_refuels": len(refuels),
+            "refuels_by_shift": by_shift.to_dicts(),
+            "refuels_by_month": by_month.to_dicts(),
+            "refuel_events_df": refuels,
+        }

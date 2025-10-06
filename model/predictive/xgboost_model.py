@@ -1,5 +1,7 @@
 import polars as pl
 import numpy as np
+import json
+import os
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
@@ -23,38 +25,36 @@ from model.utils.model_utils import analyze_multicollinearity, log_results, get_
 
 class XGBoostModel:
     """
-    Class for training an XGBoost model using native support for categorical variables.
-    More efficient than manual preprocessing (OneHot/Binary encoding).
+    Class for training TWO specialized XGBoost models:
+    - One for Stage 4 (empty truck)
+    - One for Stage 8 (loaded truck)
+    Each model uses only its relevant features for better performance.
     """
 
     def __init__(
         self,
+        truck_id: str,
         numeric_predictor_vars: List[str],
         categorical_vars: List[str],
-        max_cat_to_onehot: int = 4,  # XGBoost will automatically decide between one-hot and partitioning
+        max_cat_to_onehot: int = 4,
     ):
         """
-        Initialize model with native categorical support.
-
-        Args:
-            numeric_predictor_vars: Lista de variables numéricas
-            categorical_vars: Lista de variables categóricas
-            max_cat_to_onehot: threshold to decide between one-hot and partitioning
+        Initialize dual models with native categorical support.
         """
         self.categorical_vars = categorical_vars
         self.numeric_predictor_vars = numeric_predictor_vars
         self.df = pl.DataFrame()
         self.cycles_data = pl.DataFrame()
 
-        # XGBoost Regressor with categorical support
-        self.model = xgb.XGBRegressor(
-            n_estimators=2000,
-            learning_rate=0.05,
-            max_depth=6,
+        # MODEL FOR STAGE 4 (Empty Truck) - Simpler behavior
+        self.model_stage4 = xgb.XGBRegressor(
+            n_estimators=1500,
+            learning_rate=0.1,
+            max_depth=4,  # Less depth for simpler patterns
             min_child_weight=3,
             subsample=0.8,
             colsample_bytree=0.8,
-            tree_method="hist",  # Requerido para categorical support
+            tree_method="hist",
             device="cuda",
             random_state=42,
             eval_metric="mae",
@@ -62,75 +62,93 @@ class XGBoostModel:
             reg_alpha=0.01,
             reg_lambda=1,
             verbosity=1,
-            # ✨ Parámetros clave para soporte nativo de categóricas
             enable_categorical=True,
-            max_cat_to_onehot=max_cat_to_onehot,  # Control automático de encoding
+            max_cat_to_onehot=max_cat_to_onehot,
         )
 
+        # MODEL FOR STAGE 8 (Loaded Truck) - More complex behavior
+        self.model_stage8 = xgb.XGBRegressor(
+            n_estimators=2000,
+            learning_rate=0.05,
+            max_depth=7,  # More depth for complex patterns
+            min_child_weight=3,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            tree_method="hist",
+            device="cuda",
+            random_state=42,
+            eval_metric="mae",
+            early_stopping_rounds=100,
+            reg_alpha=0.01,
+            reg_lambda=1,
+            verbosity=1,
+            enable_categorical=True,
+            max_cat_to_onehot=max_cat_to_onehot,
+        )
+
+        # Legacy compatibility
+        self.model = None
+
+        # Feature lists for each stage
+        self.features_stage4 = []
+        self.features_stage8 = []
+
         # Results and testing data
-        self.y_test = None
-        self.y_pred = None
+        self.test_data = {}
         self.feature_names = []
 
-        # outliers detection model
-        self.iso_forest_stage_4 = None
-        self.iso_forest_stage_8 = None
+        # Outlier detection models (one per stage)
+        self.iso_forest_stage_4 = IsolationForest()
+        self.iso_forest_stage_8 = IsolationForest()
 
-        # store test data
-        self.X_test = None
+        # Logger
+        self.logger = get_logger("XGBoost_Dual", "xgb_dual.log", console=True)
 
-        # self.logger
-        self.logger = get_logger("XGBoost", "xgb.log", console=True)
+        # RMSE thresholds for decision making
+        self.rmse_threshold_st4 = 0
+        self.rmse_threshold_st8 = 0
 
-        # rmse regresion for desicion making
-        self.rmse_threshold = 0
+        # Total fuel consumed
+        self.total_consumed = 0.0
+        self.st1_fuel_consumed: float = 0.0
 
-    def load_data(self, csv_path: str = "unified_data_T-210.csv"):
-        """
-        hardcoding for moment, should be improved
-        """
-        model = LinearRegressionModel()
+        # equipment
+        self.truck_id = truck_id
+
+    def load_data(self):
+        """Load data from LinearRegressionModel"""
+        model = LinearRegressionModel(truck_id=self.truck_id)
         results = model.train_models()
-        self.rmse_threshold = (
-            results["stage_4"]["train_metrics"]["mae"]
-            + results["stage_8"]["train_metrics"]["mae"]
-        ) / 2
+        self.total_consumed = results["total_consumed_fuel"]
+        self.rmse_threshold_st4 = results["stage_4"]["train_metrics"]["mae"]
+        self.rmse_threshold_st8 = results["stage_8"]["train_metrics"]["mae"]
         self.df = model.get_predictions()
 
     def transform_cycles_data(self):
-        """
-        Process data to identify cycles and calculate fuel consumption metrics.
-        """
+        """Process data to identify cycles and calculate fuel consumption metrics."""
         self.logger.info("Transformando datos de cycle")
 
         df = self.df
+
         result = df.with_columns(
             [
-                # Calculation of fuel consumption, with default values
                 pl.when(
-                    (
-                        (
-                            pl.col("FuelConsumed") - pl.col("PredictedFuelConsumption")
-                        ).abs()
-                        > self.rmse_threshold
-                    )
-                    & (pl.col("PredictedFuelConsumption") > 0)
+                    (pl.col("PredictedFuelConsumption") > 100)
+                    & (pl.col("FuelConsumed") < 100)
                 )
-                .then(pl.col("PredictedFuelConsumption"))
-                .otherwise(pl.col("FuelConsumed"))
-                .alias("FuelConsumed"),
-                pl.when(pl.col("StageSequence") == 8)
-                .then(True)
-                .otherwise(False)
-                .alias("StageSequence"),
+                .then((pl.col("FuelConsumed") + pl.col("PredictedFuelConsumption")) / 2)
+                .when(
+                    (pl.col("PredictedFuelConsumption") > 100)
+                    & (pl.col("FuelConsumed") > 100)
+                )
+                .then(pl.col("PredictedFuelConsumption") / 2)
+                .otherwise(pl.col("PredictedFuelConsumption"))
+                .alias("FuelConsumed")
             ]
         )
 
-        # clean columns
-        cols_to_clean = self.numeric_predictor_vars + [
-            "FuelConsumed"
-        ]  # special case: fuelconsumed, target variable
-        cols_to_clean.remove("StageSequence")  # special case: stage secuence bool
+        cols_to_clean = self.numeric_predictor_vars + ["FuelConsumed"]
+        cols_to_clean.remove("StageSequence")
 
         for col in cols_to_clean:
             result = result.with_columns(
@@ -147,13 +165,53 @@ class XGBoostModel:
         self.cycles_data = result
         self.logger.info(f"Datos procesados: {len(result)} ciclos válidos.")
 
+    def _prepare_stage_data(self, df_stage, stage_name):
+        """
+        Helper function to prepare data for a specific stage.
+        Returns cleaned data after outlier removal.
+        """
+        if df_stage.empty:
+            self.logger.warning(f"⚠️ No hay datos para {stage_name}")
+            return None
+
+        self.logger.info(f"📦 Procesando {stage_name} con {len(df_stage)} registros")
+
+        # Prepare features for Isolation Forest
+        X_stage_iso = df_stage[self.numeric_predictor_vars].values
+        y_stage = df_stage["FuelConsumed"].values
+        X_with_target = np.hstack([X_stage_iso, y_stage.reshape(-1, 1)])
+
+        # Fit Isolation Forest
+        iso_forest = IsolationForest(
+            contamination=0.05,
+            random_state=42,
+            n_estimators=200,
+            max_samples="auto",
+        )
+        iso_forest.fit(X_with_target)
+        mask = iso_forest.predict(X_with_target) == 1
+
+        n_outliers = np.sum(~mask)
+        outlier_pct = (n_outliers / len(df_stage)) * 100
+        self.logger.info(
+            f"  ✂️ {stage_name}: Eliminados {n_outliers} outliers ({outlier_pct:.2f}%)"
+        )
+
+        # Store the trained isolation forest
+        if stage_name == "Stage 4":
+            self.iso_forest_stage_4 = iso_forest
+        else:
+            self.iso_forest_stage_8 = iso_forest
+
+        return df_stage[mask].copy()
+
     def prepare_data(self):
         """
-        Prepare data for XGBoost training using native categorical support.
+        Prepare separate datasets for Stage 4 and Stage 8.
+        Returns a dictionary with train/test splits for each stage.
         """
-        self.logger.info("Preparing data for training...")
+        self.logger.info("🔧 Preparando datos para entrenamiento dual...")
 
-        # convert to pandas
         df = self.cycles_data.to_pandas().copy()
 
         # Split numeric and categorical features
@@ -164,526 +222,304 @@ class XGBoostModel:
         # Assign categorical dtype
         for cat_col in self.categorical_vars:
             X_categorical[cat_col] = X_categorical[cat_col].astype("category")
-            print(
-                f"Variable '{cat_col}' convertida a categoría con {X_categorical[cat_col].nunique()} valores únicos"
+            self.logger.info(
+                f"  Variable '{cat_col}' convertida a categoría con {X_categorical[cat_col].nunique()} valores únicos"
             )
 
-        # convine numeric and categorical features
+        # Combine features
         df_full = pd.concat([X_numeric, X_categorical], axis=1)
         df_full["FuelConsumed"] = y
         df_full["StageSequence"] = df["StageSequence"]
 
-        # List to hold cleaned data per stage
-        df_clean_list = []
+        # SEPARATE BY STAGE
+        df_stage4 = df_full[df_full["StageSequence"] == 4].copy()
+        df_stage8 = df_full[df_full["StageSequence"] == 8].copy()
 
-        # Apply Isolation Forest separately for each StageSequence value
-        for stage_value in [True, False]:
-            df_stage = df_full[df_full["StageSequence"] == stage_value].copy()
-            if df_stage.empty:
-                continue
+        self.logger.info(f"\n📊 Distribución de datos:")
+        self.logger.info(f"  Stage 4 (vacío): {len(df_stage4)} registros")
+        self.logger.info(f"  Stage 8 (lleno): {len(df_stage8)} registros")
 
-            self.logger.info(
-                f"Processing StageSequence={stage_value} with {len(df_stage)} records"
-            )
+        # Clean outliers for each stage
+        df_stage4_clean = self._prepare_stage_data(df_stage4, "Stage 4")
+        df_stage8_clean = self._prepare_stage_data(df_stage8, "Stage 8")
 
-            # Prepare features for Isolation Forest: numeric + target
-            X_stage_iso = df_stage[self.numeric_predictor_vars].values
-            y_stage = df_stage["FuelConsumed"].values
-            X_with_target = np.hstack([X_stage_iso, y_stage.reshape(-1, 1)])
+        # Define specific features for each stage
+        # Stage 4: Only features available for empty trucks
+        features_s4_numeric = [
+            "SpeedAvg",
+            "Distance",
+            "CycleDurationSeconds",
+            "TimeEfficiencyPercentage",
+        ]
+        features_s4_categorical = [
+            "Shovel",
+            "Destination",
+            "DestinationType",
+        ]
 
-            # Fit Isolation Forest
-            iso_forest_stage = IsolationForest(
-                contamination=0.05,
-                random_state=42,
-                n_estimators=200,
-                max_samples="auto",
-            )
-            iso_forest_stage.fit(X_with_target)
-            mask = iso_forest_stage.predict(X_with_target) == 1
+        # Stage 8: Only features available for loaded trucks
+        features_s8_numeric = [
+            "SpeedAvg",
+            "TotalMeasuredTonnage",
+            "Distance",
+            "CycleDurationSeconds",
+            "TimeEfficiencyPercentage",
+        ]
+        features_s8_categorical = ["Destination", "DestinationType", "Material"]
 
-            n_outliers = np.sum(~mask)
-            outlier_pct = (n_outliers / len(df_stage)) * 100
-            self.logger.info(
-                f"StageSequence={stage_value}: Removed {n_outliers} outliers ({outlier_pct:.2f}%)"
-            )
+        # Filter only available features for each stage
+        available_s4_num = [
+            f for f in features_s4_numeric if f in df_stage4_clean.columns
+        ]
+        available_s4_cat = [
+            f for f in features_s4_categorical if f in df_stage4_clean.columns
+        ]
 
-            # Keep only inliers
-            df_stage_clean = df_stage[mask].copy()
-            df_clean_list.append(df_stage_clean)
+        available_s8_num = [
+            f for f in features_s8_numeric if f in df_stage8_clean.columns
+        ]
+        available_s8_cat = [
+            f for f in features_s8_categorical if f in df_stage8_clean.columns
+        ]
 
-            if stage_value:
-                self.iso_forest_stage_8 = iso_forest_stage
-            else:
-                self.iso_forest_stage_4 = iso_forest_stage
+        self.features_stage4 = available_s4_num + available_s4_cat
+        self.features_stage8 = available_s8_num + available_s8_cat
 
-        # Concatenate cleaned stages
-        df_cleaned = pd.concat(df_clean_list, axis=0).reset_index(drop=True)
+        self.logger.info(f"\n🎯 Features Stage 4: {self.features_stage4}")
+        self.logger.info(f"🎯 Features Stage 8: {self.features_stage8}")
 
-        # Split back numeric, categorical, and target
-        X_numeric_clean = df_cleaned[self.numeric_predictor_vars]
-        X_categorical_clean = df_cleaned[self.categorical_vars]
-        y_clean = df_cleaned["FuelConsumed"]
-
-        # Final feature matrix for XGBoost
-        X_final = pd.concat([X_numeric_clean, X_categorical_clean], axis=1)
-
-        # Save feature names
-        self.feature_names = list(X_final.columns)
-
-        self.logger.info(
-            f"Final dataset size after stage-wise outlier removal: {len(X_final)} records"
+        # Prepare Stage 4 data
+        X_stage4 = df_stage4_clean[self.features_stage4]
+        y_stage4 = df_stage4_clean["FuelConsumed"]
+        X_train_4, X_test_4, y_train_4, y_test_4 = train_test_split(
+            X_stage4, y_stage4, test_size=0.2, random_state=42
         )
-        self.logger.info(f"Numeric features: {self.numeric_predictor_vars}")
-        self.logger.info(f"Categorical features: {self.categorical_vars}")
-        self.logger.info("Final dtypes:")
-        for col in X_final.columns:
-            self.logger.info(f"  {col}: {X_final[col].dtype}")
 
-        return train_test_split(X_final, y_clean, test_size=0.2, random_state=42)
+        # Prepare Stage 8 data
+        X_stage8 = df_stage8_clean[self.features_stage8]
+        y_stage8 = df_stage8_clean["FuelConsumed"]
+        X_train_8, X_test_8, y_train_8, y_test_8 = train_test_split(
+            X_stage8, y_stage8, test_size=0.2, random_state=42
+        )
+
+        return {
+            "stage4": (X_train_4, X_test_4, y_train_4, y_test_4),
+            "stage8": (X_train_8, X_test_8, y_train_8, y_test_8),
+        }
+
+    def _calculate_metrics(self, y_true, y_pred):
+        """Helper to calculate performance metrics"""
+        y_pred_non_neg = np.maximum(y_pred, 0.1)
+        y_true_non_neg = np.maximum(y_true, 0.1)
+
+        try:
+            rmsle = np.sqrt(mean_squared_log_error(y_true_non_neg, y_pred_non_neg))
+        except ValueError:
+            rmsle = float("inf")
+
+        mape_safe = np.mean(np.abs((y_true - y_pred) / np.maximum(y_true, 0.1))) * 100
+
+        return {
+            "R2": r2_score(y_true, y_pred),
+            "MAE": mean_absolute_error(y_true, y_pred),
+            "RMSE": np.sqrt(mean_squared_error(y_true, y_pred)),
+            "MAPE_Safe": mape_safe,
+            "MedianAE": median_absolute_error(y_true, y_pred),
+            "RMSLE": rmsle,
+            "ExplainedVar": explained_variance_score(y_true, y_pred),
+        }
 
     def train(self):
         """
-        Train the XGBoost model with native categorical support.
-
-        This method handles the complete training pipeline:
-        - Prepares training and testing datasets (numeric + categorical features).
-        - Trains an XGBoost model with native categorical handling.
-        - Calculates multiple performance metrics (R², MAE, RMSE, RMSLE, MAPE, etc.).
-        - Stores test predictions for later visualization and analysis.
-
-        Logging:
-            - Logs dataset size and dimensionality.
-            - Logs model training progress, best iteration, and feature types.
-            - Logs training completion with metrics.
-
-        Returns:
-            Dict[str, float]: Dictionary containing evaluation metrics including:
-                - R2: Coefficient of determination
-                - MAE: Mean Absolute Error
-                - RMSE: Root Mean Squared Error
-                - MAPE_Safe: Mean Absolute Percentage Error (safe version)
-                - MedianAE: Median Absolute Error
-                - RMSLE: Root Mean Squared Logarithmic Error
-                - ExplainedVar: Explained Variance Score
+        Train both specialized XGBoost models (Stage 4 and Stage 8).
+        Returns metrics for both models.
         """
-        X_train, X_test, y_train, y_test = self.prepare_data()
+        data_splits = self.prepare_data()
 
-        # Save original test indices for traceability
-        self.test_indices_original = X_test.index
+        # ============ TRAIN MODEL STAGE 4 ============
+        self.logger.info("\n" + "=" * 70)
+        self.logger.info("🚛 ENTRENANDO MODELO PARA STAGE 4 (Camión Vacío)")
+        self.logger.info("=" * 70)
 
-        self.logger.info(f"Entrenando con {len(X_train)} records...")
+        X_train_4, X_test_4, y_train_4, y_test_4 = data_splits["stage4"]
 
-        # train model and evaluate simultaneously
-        self.model.fit(
-            X_train,
-            y_train,
-            eval_set=[(X_train, y_train), (X_test, y_test)],
+        self.logger.info(
+            f"📦 Datos Stage 4 - Train: {len(X_train_4)}, Test: {len(X_test_4)}"
+        )
+
+        self.model_stage4.fit(
+            X_train_4,
+            y_train_4,
+            eval_set=[(X_train_4, y_train_4), (X_test_4, y_test_4)],
             verbose=50,
         )
 
-        self.logger.info(f"Mejor iteración: {self.model.best_iteration}")
-
-        # Mostrar información sobre cómo XGBoost procesó las categóricas
         self.logger.info(
-            f"Tipos de features detectados por XGBoost: {self.model.get_booster().feature_types}"
+            f"✅ Mejor iteración Stage 4: {self.model_stage4.best_iteration}"
         )
 
-        # make predictionson test set
-        y_pred = self.model.predict(X_test)
+        y_pred_4 = self.model_stage4.predict(X_test_4)
+        metrics_4 = self._calculate_metrics(y_test_4, y_pred_4)
 
-        # Ensure predictions are non-negative (important for RMSLE and fuel data)
-        y_pred_non_negative = np.maximum(y_pred, 0.1)
-        y_test_non_negative = np.maximum(y_test, 0.1)
+        self.logger.info(f"\n📊 Métricas Stage 4 (Camión Vacío):")
+        self.logger.info(f"  R²: {metrics_4['R2']:.4f}")
+        self.logger.info(f"  MAE: {metrics_4['MAE']:.2f} litros")
+        self.logger.info(f"  RMSE: {metrics_4['RMSE']:.2f} litros")
+        self.logger.info(f"  MAPE: {metrics_4['MAPE_Safe']:.2f}%")
 
-        try:
-            rmsle = np.sqrt(
-                mean_squared_log_error(y_test_non_negative, y_pred_non_negative)
-            )
-        except ValueError:
-            # If RMSLE cannot be computed (e.g., due to invalid values)
-            rmsle = float("inf")
+        # ============ TRAIN MODEL STAGE 8 ============
+        self.logger.info("\n" + "=" * 70)
+        self.logger.info("🚛 ENTRENANDO MODELO PARA STAGE 8 (Camión Lleno)")
+        self.logger.info("=" * 70)
 
-        # save results
-        self.y_test = y_test
-        self.y_pred = y_pred
-        self.X_test = X_test
+        X_train_8, X_test_8, y_train_8, y_test_8 = data_splits["stage8"]
 
-        # MAPE safe calculation to avoid division by zero
-        mape_safe = np.mean(np.abs((y_test - y_pred) / np.maximum(y_test, 0.1))) * 100
-
-        metrics = {
-            "R2": r2_score(y_test, y_pred),
-            "MAE": mean_absolute_error(y_test, y_pred),
-            "RMSE": np.sqrt(mean_squared_error(y_test, y_pred)),
-            "MAPE_Safe": mape_safe,
-            "MedianAE": median_absolute_error(y_test, y_pred),
-            "RMSLE": rmsle,
-            "ExplainedVar": explained_variance_score(y_test, y_pred),
-        }
-
-        # store evaluation metrics
-        results = {
-            "model": str(type(self.model).__name__),
-            # "isolation_forest": str(type(self.iso_forest).__name__),
-            "samples": {
-                "train": len(X_train),
-                "test": len(X_test),
-            },
-            "metrics": metrics,
-            "multicollinearity": analyze_multicollinearity(
-                self.cycles_data, self.numeric_predictor_vars
-            ),
-        }
-        log_results(self.numeric_predictor_vars, "all", results, self.logger)
         self.logger.info(
-            "Training completed. Evaluation metrics calculated successfully."
+            f"📦 Datos Stage 8 - Train: {len(X_train_8)}, Test: {len(X_test_8)}"
         )
-        return results
 
-    def plot_predictions(self, save_path: str, results: dict):
-        """
-        Generate visual plots comparing model predictions against actual values.
-        This method creates two visualizations:
-        1. Time series plot showing the progression of predictions vs real values.
-        2. Scatter plot comparing predictions against real values with a "perfect fit" line.
-        Metrics (R² and RMSE) are displayed on the scatter plot for quick interpretation.
+        self.model_stage8.fit(
+            X_train_8,
+            y_train_8,
+            eval_set=[(X_train_8, y_train_8), (X_test_8, y_test_8)],
+            verbose=50,
+        )
 
-        Args:
-            save_path (str, optional): File path to save the generated plots.
-                                    If None, plots are only displayed.
-            results (dict, optional): Results dictionary containing metrics.
-                                    If None, will calculate metrics from y_test and y_pred.
+        self.logger.info(
+            f"✅ Mejor iteración Stage 8: {self.model_stage8.best_iteration}"
+        )
 
-        Logging:
-            - Logs error if model is not trained before plotting.
-            - Logs confirmation if plots are saved to disk.
-        """
-        if self.y_test is None or self.y_pred is None:
-            self.logger.error("Model must be trained before plotting predictions.")
-            return
+        y_pred_8 = self.model_stage8.predict(X_test_8)
+        metrics_8 = self._calculate_metrics(y_test_8, y_pred_8)
 
-        # Validar que tenemos datos válidos
-        if len(self.y_test) == 0 or len(self.y_pred) == 0:
-            self.logger.error("No hay datos de predicción para graficar.")
-            return
+        self.logger.info(f"\n📊 Métricas Stage 8 (Camión Lleno):")
+        self.logger.info(f"  R²: {metrics_8['R2']:.4f}")
+        self.logger.info(f"  MAE: {metrics_8['MAE']:.2f} litros")
+        self.logger.info(f"  RMSE: {metrics_8['RMSE']:.2f} litros")
+        self.logger.info(f"  MAPE: {metrics_8['MAPE_Safe']:.2f}%")
 
-        # Obtener métricas
-        try:
-            if results and "metrics" in results:
-                # Estructura anidada: results["metrics"]["R2"]
-                r2 = results["metrics"]["R2"]
-                rmse = results["metrics"]["RMSE"]
-            elif results and "R2" in results:
-                # Estructura plana: results["R2"]
-                r2 = results["R2"]
-                rmse = results["RMSE"]
+        # Store test data for later visualization
+        self.test_data = {
+            "stage4": {"X": X_test_4, "y_true": y_test_4, "y_pred": y_pred_4},
+            "stage8": {"X": X_test_8, "y_true": y_test_8, "y_pred": y_pred_8},
+        }
+
+        # Summary comparison
+        self.logger.info("\n" + "=" * 70)
+        self.logger.info("📊 COMPARACIÓN DE MODELOS")
+        self.logger.info("=" * 70)
+        self.logger.info(
+            f"{'Métrica':<15} {'Stage 4':>15} {'Stage 8':>15} {'Mejora':>15}"
+        )
+        self.logger.info("-" * 70)
+        for metric in ["R2", "MAE", "RMSE"]:
+            val_4 = metrics_4[metric]
+            val_8 = metrics_8[metric]
+            if metric == "R2":
+                mejora = ((val_8 - val_4) / abs(val_4)) * 100
             else:
-                # Calcular métricas si no se proporcionan
-                from sklearn.metrics import r2_score, mean_squared_error
-
-                r2 = r2_score(self.y_test, self.y_pred)
-                rmse = np.sqrt(mean_squared_error(self.y_test, self.y_pred))
-                self.logger.info(
-                    "Métricas calculadas automáticamente ya que no se proporcionaron en results."
-                )
-        except KeyError as e:
-            self.logger.error(f"Error accediendo a las métricas: {e}")
-            # Calcular métricas como fallback
-            from sklearn.metrics import r2_score, mean_squared_error
-
-            r2 = r2_score(self.y_test, self.y_pred)
-            rmse = np.sqrt(mean_squared_error(self.y_test, self.y_pred))
-
-        plt.style.use("default")
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 6))
-
-        # Convertir a numpy arrays si es necesario para evitar problemas de indexing
-        y_test_array = (
-            np.array(self.y_test) if hasattr(self.y_test, "__iter__") else self.y_test
-        )
-        y_pred_array = (
-            np.array(self.y_pred) if hasattr(self.y_pred, "__iter__") else self.y_pred
-        )
-
-        indices = range(1, len(y_test_array) + 1)
-
-        # Gráfica 1: Series de tiempo
-        ax1.plot(
-            indices,
-            y_test_array,
-            "o-",
-            color="blue",
-            alpha=0.7,
-            label="Valores Reales",
-            markersize=4,
-            linewidth=1,
-        )
-        ax1.plot(
-            indices,
-            y_pred_array,
-            "o-",
-            color="red",
-            alpha=0.7,
-            label="Predicciones",
-            markersize=4,
-            linewidth=1,
-        )
-        ax1.set_xlabel("Índice del Registro")
-        ax1.set_ylabel("Consumo de Combustible (Litros)")
-        ax1.set_title("Predicciones vs Valores Reales (XGBoost Nativo)")
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-
-        # Gráfica 2: Scatter plot
-        ax2.scatter(y_test_array, y_pred_array, alpha=0.6, color="green", s=30)
-
-        # Calcular rango para la línea de predicción perfecta
-        min_val = min(np.min(y_test_array), np.min(y_pred_array))
-        max_val = max(np.max(y_test_array), np.max(y_pred_array))
-
-        ax2.plot(
-            [min_val, max_val],
-            [min_val, max_val],
-            "r--",
-            label="Predicción Perfecta",
-            linewidth=2,
-        )
-        ax2.set_xlabel("Valores Reales (Litros)")
-        ax2.set_ylabel("Predicciones (Litros)")
-        ax2.set_title("Scatter Plot: XGBoost con Soporte Nativo")
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-
-        # Añadir métricas al gráfico
-        ax2.text(
-            0.05,
-            0.95,
-            f"R² = {r2:.3f}\nRMSE = {rmse:.2f}",
-            transform=ax2.transAxes,
-            verticalalignment="top",
-            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
-        )
-
-        # Gráfica 3: Matriz de correlación
-        if results and "multicollinearity" in results:
-            try:
-                corr_matrix = results["multicollinearity"]["correlation_matrix"]
-                corr_df = pd.DataFrame(corr_matrix)
-                sns.heatmap(
-                    corr_df, annot=False, cmap="coolwarm", center=0, cbar=True, ax=ax3
-                )
-                ax3.set_title("Matriz de Correlación (Predictoras)")
-            except Exception as e:
-                self.logger.error(f"Error graficando matriz de correlación: {e}")
-                ax3.text(
-                    0.5,
-                    0.5,
-                    "No se pudo graficar\nmatriz de correlación",
-                    ha="center",
-                    va="center",
-                )
-        else:
-            ax3.text(
-                0.5,
-                0.5,
-                "No hay matriz de correlación disponible",
-                ha="center",
-                va="center",
+                mejora = ((val_4 - val_8) / val_4) * 100
+            self.logger.info(
+                f"{metric:<15} {val_4:>15.4f} {val_8:>15.4f} {mejora:>14.2f}%"
             )
 
-        plt.tight_layout()
+        results = {
+            "stage4": {
+                "samples": {"train": len(X_train_4), "test": len(X_test_4)},
+                "metrics": metrics_4,
+                "features": self.features_stage4,
+            },
+            "stage8": {
+                "samples": {"train": len(X_train_8), "test": len(X_test_8)},
+                "metrics": metrics_8,
+                "features": self.features_stage8,
+            },
+            "total_consumed_fuel": self.total_consumed,
+        }
 
-        # Guardar si se especifica ruta
-        if save_path:
-            try:
-                plt.savefig(save_path, dpi=300, bbox_inches="tight")
-                self.logger.info(f"Gráfica guardada en: {save_path}")
-            except Exception as e:
-                self.logger.error(f"Error guardando la gráfica: {e}")
-
-        plt.show()
-
-    def get_feature_importance(self):
-        """
-        Extract and return feature importance from trained model.
-
-        Feature importance is computed directly from the trained XGBoost model
-        using gain-based importance scores.
-
-        Returns:
-            pd.DataFrame: Sorted DataFrame with two columns:
-                - feature: Feature name
-                - importance: Importance score (higher = more important)
-
-        Logging:
-            - Logs confirmation when feature importance has been extracted.
-        """
-        if self.model is None:
-            self.logger.error(
-                "Model must be trained before extracting feature importance."
-            )
-            return pd.DataFrame()
-
-        importance = self.model.feature_importances_
-        feature_importance = pd.DataFrame(
-            {"feature": self.feature_names, "importance": importance}
-        ).sort_values("importance", ascending=False)
-
-        self.logger.info("Feature importance extracted successfully.")
-
-        return feature_importance
-
-    def print_feature_importance(self):
-        """
-        Print feature importance grouped by feature type (numeric vs categorical).
-
-        Uses the feature importance extracted by `get_feature_importance()` and
-        separates them into numeric and categorical groups for readability.
-
-        Logging:
-            - Logs the importance of numeric and categorical variables separately.
-        """
-        importance_df = self.get_feature_importance()
-        if importance_df.empty:
-            self.logger.error("No feature importance data available.")
-            return
-
-        self.logger.info(
-            "\n===== Importancia de Características (XGBoost Nativo) ====="
-        )
-
-        # split by type
-        numeric_features = importance_df[
-            importance_df["feature"].isin(self.numeric_predictor_vars)
-        ]
-        categorical_features = importance_df[
-            importance_df["feature"].isin(self.categorical_vars)
-        ]
-
-        self.logger.info("\n Variables Numéricas:")
-        for _, row in numeric_features.iterrows():
-            self.logger.info(f"  {row['feature']}: {row['importance']:.4f}")
-
-        self.logger.info("\n Variables Categóricas (Procesamiento Nativo):")
-        for _, row in categorical_features.iterrows():
-            self.logger.info(f"  {row['feature']}: {row['importance']:.4f}")
-
-        self.logger.info(f"\nResumen:")
-        self.logger.info(f"  Total features: {len(importance_df)}")
-        self.logger.info(f"  Features numéricas: {len(numeric_features)}")
-        self.logger.info(f"  Features categóricas: {len(categorical_features)}")
-
-    def save_model(self, path: str = "xgboost_native_categorical.json"):
-        """
-        Save trained XGBoost model in JSON format.
-
-        JSON format is mandatory when using native categorical support,
-        since binary formats (like .bin) do not preserve categorical metadata.
-
-        Args:
-            path (str, optional): File path to save the model. Defaults to JSON.
-
-        Logging:
-            - Logs confirmation of model saving and reminders about JSON usage.
-        """
-        self.model.get_booster().save_model(path)
-        self.logger.info(f" Modelo guardado en: {path}")
-        self.logger.info(
-            " IMPORTANTE: Usar formato JSON para preservar información categórica"
-        )
+        self.logger.info("\n✅ Entrenamiento completado para ambos modelos.")
+        return results
 
     def get_predictions(self) -> pl.DataFrame:
         """
-        Generate extended dataset with predictions, residuals, and outlier detection.
-
-        This method applies the trained model to the **entire dataset** (`cycles_data`)
-        and enriches it with:
-            - Predicted fuel consumption for each cycle
-            - Residuals (difference between actual and predicted values)
-            - Inlier/outlier flags based on Isolation Forest applied to numeric variables
-
-        Returns:
-            pl.DataFrame: Original dataset with new columns:
-                - PredictedFuelXGBoost
-                - residual
-                - is_inlier
-                - is_outlier
-
-        Raises:
-            RuntimeError: If the model is not trained before calling this method.
-
-        Logging:
-            - Logs when predictions and residuals are added to the dataset.
+        Generate predictions using the appropriate specialized model.
+        Stage 4 records use model_stage4, Stage 8 records use model_stage8.
         """
-        # Check that the model is trained
-        if not hasattr(self, "model") or self.model is None:
+        if self.model_stage4 is None or self.model_stage8 is None:
             raise RuntimeError(
-                "El modelo no está entrenado. Ejecute primero train_model()."
+                "❌ Los modelos no están entrenados. Ejecute train() primero."
             )
 
-        # convert data to pandas for compatibility with XGBoost
+        self.logger.info("🔮 Generando predicciones con modelos especializados...")
+
         df_all = self.cycles_data.to_pandas()
+        predictions = np.zeros(len(df_all))
 
-        # Prepare numeric and categorical features consistently with training
-        X_all = df_all[self.numeric_predictor_vars + self.categorical_vars].copy()
+        # PREDICT STAGE 4 (Empty Truck)
+        mask_4 = df_all["StageSequence"] == 4
+        if mask_4.any():
+            X_stage4 = df_all.loc[mask_4, self.features_stage4].copy()
 
-        # Convert categorical variables to 'category' dtype (same as in training)
-        for cat_col in self.categorical_vars:
-            X_all[cat_col] = X_all[cat_col].astype("category")
+            # Convert categorical variables
+            for cat_col in self.categorical_vars:
+                if cat_col in X_stage4.columns:
+                    X_stage4[cat_col] = X_stage4[cat_col].astype("category")
 
-        # run predictions for all available data
-        y_pred_all = self.model.predict(X_all)
+            predictions[mask_4] = self.model_stage4.predict(X_stage4)
+            self.logger.info(f"  ✅ Stage 4: {mask_4.sum()} predicciones")
+
+        # PREDICT STAGE 8 (Loaded Truck)
+        mask_8 = df_all["StageSequence"] == 8
+        if mask_8.any():
+            X_stage8 = df_all.loc[mask_8, self.features_stage8].copy()
+
+            # Convert categorical variables
+            for cat_col in self.categorical_vars:
+                if cat_col in X_stage8.columns:
+                    X_stage8[cat_col] = X_stage8[cat_col].astype("category")
+
+            predictions[mask_8] = self.model_stage8.predict(X_stage8)
+            self.logger.info(f"  ✅ Stage 8: {mask_8.sum()} predicciones")
+
+        # Calculate residuals
         y_true_all = df_all["FuelConsumed"].values
+        residuals_all = y_true_all - predictions
 
-        # compute residuals
-        residuals_all = y_true_all - y_pred_all
-
-        # apply outlier detection on numeric features
-        # CORRECCIÓN: Verificar que los modelos de IsolationForest están entrenados
-        if self.iso_forest_stage_8 is None or self.iso_forest_stage_4 is None:
-            raise RuntimeError(
-                "Los modelos de detección de outliers no están entrenados. Ejecute primero train()."
-            )
-
-        # CORRECCIÓN: Aplicar detección de outliers por etapa usando los modelos entrenados
+        # Outlier detection using corresponding models
         is_inlier = np.zeros(len(df_all), dtype=bool)
         is_outlier = np.zeros(len(df_all), dtype=bool)
 
-        # Para cada etapa, usar el modelo IsolationForest correspondiente
-        for stage_value in [True, False]:
-            stage_mask = df_all["StageSequence"] == stage_value
+        for stage_value, stage_mask in [(False, mask_4), (True, mask_8)]:
             if not stage_mask.any():
                 continue
 
-            # Obtener datos numéricos para esta etapa
             X_numeric_stage = df_all.loc[stage_mask, self.numeric_predictor_vars]
             y_stage = df_all.loc[stage_mask, "FuelConsumed"].values
             X_with_target = np.hstack([X_numeric_stage.values, y_stage.reshape(-1, 1)])
 
-            # Usar el modelo IsolationForest correspondiente
-            if stage_value:
-                outlier_predictions = self.iso_forest_stage_8.predict(X_with_target)
-            else:
-                outlier_predictions = self.iso_forest_stage_4.predict(X_with_target)
+            iso_model = (
+                self.iso_forest_stage_4 if not stage_value else self.iso_forest_stage_8
+            )
+            outlier_preds = iso_model.predict(X_with_target)
 
-            # Actualizar las máscaras de inliers/outliers
             stage_indices = np.where(stage_mask)[0]
-            is_inlier[stage_indices] = outlier_predictions == 1
-            is_outlier[stage_indices] = outlier_predictions == -1
+            is_inlier[stage_indices] = outlier_preds == 1
+            is_outlier[stage_indices] = outlier_preds == -1
 
-        # convert back to polars and enrich dataset
+        # Create result DataFrame
         result = self.cycles_data.with_columns(
             [
-                pl.Series("PredictedFuelXGBoost", y_pred_all),
+                pl.Series("PredictedFuelXGBoost", predictions),
                 pl.Series("residual", residuals_all),
                 pl.Series("is_inlier", is_inlier),
                 pl.Series("is_outlier", is_outlier),
             ]
-        ).with_columns(
-            pl.when(pl.col("StageSequence")).then(8).otherwise(4).alias("StageSequence")
         )
 
-        self.logger.info("Predictions, residuals, and outlier flags added to dataset.")
+        self.logger.info(
+            "✅ Predicciones generadas exitosamente usando modelos especializados."
+        )
+        # use -> .filter((pl.col("PredictedFuelXGBoost") > 0) & (pl.col("FuelConsumed") > 0))
         return result.select(
             [
                 "cycle_group",
@@ -716,225 +552,396 @@ class XGBoostModel:
             ]
         ).sort("cycle_group")
 
-    def explain_model(self, max_display: int = 15, plots: bool = False):
+    def plot_predictions(self, save_path: str = None, results: dict = None):
         """
-        Generate SHAP-based explanations for the trained XGBoost model.
-        This method uses SHAP (SHapley Additive exPlanations) to interpret the trained
-        XGBoost model. SHAP values provide insights into how much each feature contributes
-        to the model's predictions, both on average and per individual prediction.
-
-        The method performs the following steps:
-            1. Verifies that the model and test data exist.
-            2. Constructs a SHAP TreeExplainer, tailored for tree-based models like XGBoost.
-            3. Calculates SHAP values for the test dataset.
-            4. Aggregates and ranks features based on their mean absolute contribution.
-            5. Logs the top contributing features (limited by `max_display`).
-            6. Evaluates the additivity property of SHAP explanations by comparing
-            the reconstructed prediction (SHAP sum + expected value) against
-            the model's raw predictions.
-            7. Logs the relative mean and maximum additivity errors as a measure
-            of explanation accuracy.
-
-        Args:
-            max_display (int, optional): Maximum number of top features to display.
-                                        Defaults to 15.
-
-        Returns:
-            tuple: (shap_values_explanation, importance_df) for further analysis
+        Generate visual plots comparing predictions vs actual values for BOTH stages.
+        Creates separate visualizations for Stage 4 and Stage 8.
         """
-        if not hasattr(self, "model") or self.model is None:
-            self.logger.error("❌ Error: El modelo no ha sido entrenado todavía.")
-
-        if not hasattr(self, "X_test") or self.X_test is None:
-            self.logger.error(
-                "❌ Error: No existen datos de test. Ejecute train() primero."
-            )
-
-        self.logger.info("\n Calculando explicaciones con SHAP...")
-        try:
-            # Crear SHAP explainer
-            explainer = shap.TreeExplainer(
-                self.model, feature_perturbation="interventional"
-            )
-
-            # Compute SHAP values for test data
-            shap_values = explainer.shap_values(self.X_test, check_additivity=False)
-
-            # Wrap SHAP results into an Explanation object (for compatibility with plots)
-            shap_values_explanation = shap.Explanation(
-                values=shap_values,
-                base_values=explainer.expected_value,
-                data=self.X_test,
-                feature_names=self.feature_names,
-            )
-
-            # Calculate average absolute importance per feature
-            shap_importance = np.abs(shap_values).mean(axis=0)
-            importance_df = pd.DataFrame(
-                {"feature": self.feature_names, "mean_abs_shap": shap_importance}
-            ).sort_values("mean_abs_shap", ascending=False)
-
-            self.logger.info("\n===== Aporte de variables según SHAP =====")
-            for _, row in importance_df.head(
-                max_display
-            ).iterrows():  # Corregido: quitado asteriscos
-                self.logger.info(f"  {row['feature']}: {row['mean_abs_shap']:.4f}")
-
-            # Validate SHAP additivity property (prediction = sum(shap) + expected_value)
-            shap_sum = shap_values.sum(axis=1) + explainer.expected_value
-            preds = self.model.predict(self.X_test)
-            additivity_error = np.abs(shap_sum - preds) / (np.abs(preds) + 1e-8)
-
-            self.logger.info(
-                f"📊 Media error relativo de aditividad: {additivity_error.mean():.6f}"
-            )  # Corregido: formato f-string
-            self.logger.info(
-                f"📈 Máximo error relativo: {additivity_error.max():.6f}"
-            )  # Corregido: formato f-string
-
-            # Store SHAP values for later use
-            self.shap_values = shap_values
-            self.shap_explainer = explainer
-            self.shap_explanation = shap_values_explanation
-
-            self.logger.info("✅ Explicaciones SHAP calculadas correctamente.")
-
-            if plots:
-                # create combined plots
-                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 14))
-                manager = plt.get_current_fig_manager()
-
-                plt.sca(ax1)
-                shap.summary_plot(
-                    shap_values_explanation.values,
-                    self.X_test,
-                    feature_names=self.feature_names,
-                    show=False,
-                )
-                shap.plots.bar(shap_values_explanation, ax=ax2, show=False)
-                plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0.1)
-                plt.tight_layout(pad=0.5)
-                plt.show()
-
-        except Exception as e:
-            self.logger.error(f"❌ Error calculando explicaciones SHAP: {str(e)}")
-        # Opcional: gráfico resumen
-        # shap.summary_plot(shap_values, self.X_test, feature_names=self.feature_names)
-        # shap.plots.bar(shap_values_explanation)
-        # shap.plots.waterfall(shap_values_explanation[0])
-
-    def predict_manual(self):
-        """
-        Perform manual prediction by entering feature values via console input.
-
-        This method allows interactive predictions by prompting the user to input
-        values for both numeric and categorical features. It is useful for testing
-        the model with custom scenarios, "what-if" analysis, or educational purposes.
-
-        The method performs the following steps:
-            1. Validates that a trained model is available.
-            2. Prompts the user to input numeric feature values (validated as floats).
-            3. Prompts the user to input categorical feature values as strings.
-            4. Constructs a DataFrame from the collected inputs.
-            5. Ensures categorical columns are properly typed.
-            6. Concatenates numeric and categorical features into the final input matrix.
-            7. Passes the data into the trained model for prediction.
-            8. Logs the predicted fuel consumption.
-
-        Returns:
-            float: Predicted fuel consumption value for the provided inputs.
-        """
-        if not hasattr(self, "model") or self.model is None:
-            self.logger.error(
-                "❌ Error: El modelo no está entrenado. Ejecute train() primero."
-            )
+        if not self.test_data:
+            self.logger.error("❌ No hay datos de test. Entrene el modelo primero.")
             return
 
-        self.logger.info("\n Ingrese los valores para la predicción:")
+        fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+        plt.style.use("default")
 
-        # collect numeric feature inputs
-        input_data = {}
-        for var in self.numeric_predictor_vars:
+        stages = [
+            ("stage4", "Stage 4 (Vacío)", "blue"),
+            ("stage8", "Stage 8 (Lleno)", "red"),
+        ]
+
+        for idx, (stage_key, stage_name, color) in enumerate(stages):
+            data = self.test_data[stage_key]
+            y_test = np.array(data["y_true"])
+            y_pred = np.array(data["y_pred"])
+
+            if results and stage_key in results and "metrics" in results[stage_key]:
+                r2 = results[stage_key]["metrics"]["R2"]
+                rmse = results[stage_key]["metrics"]["RMSE"]
+            else:
+                r2 = r2_score(y_test, y_pred)
+                rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+
+            # Plot 1: Time series
+            indices = range(1, len(y_test) + 1)
+            axes[idx, 0].plot(
+                indices,
+                y_test,
+                "o-",
+                alpha=0.7,
+                label="Real",
+                markersize=3,
+                linewidth=1,
+            )
+            axes[idx, 0].plot(
+                indices,
+                y_pred,
+                "o-",
+                alpha=0.7,
+                label="Predicción",
+                markersize=3,
+                linewidth=1,
+                color=color,
+            )
+            axes[idx, 0].set_xlabel("Índice")
+            axes[idx, 0].set_ylabel("Combustible (L)")
+            axes[idx, 0].set_title(f"{stage_name} - Serie Temporal")
+            axes[idx, 0].legend()
+            axes[idx, 0].grid(True, alpha=0.3)
+
+            # Plot 2: Scatter
+            axes[idx, 1].scatter(y_test, y_pred, alpha=0.6, s=30, color=color)
+            min_val = min(np.min(y_test), np.min(y_pred))
+            max_val = max(np.max(y_test), np.max(y_pred))
+            axes[idx, 1].plot(
+                [min_val, max_val],
+                [min_val, max_val],
+                "k--",
+                linewidth=2,
+                label="Perfecto",
+            )
+            axes[idx, 1].set_xlabel("Real (L)")
+            axes[idx, 1].set_ylabel("Predicción (L)")
+            axes[idx, 1].set_title(f"{stage_name} - Scatter Plot")
+            axes[idx, 1].legend()
+            axes[idx, 1].grid(True, alpha=0.3)
+            axes[idx, 1].text(
+                0.05,
+                0.95,
+                f"R² = {r2:.3f}\nRMSE = {rmse:.2f}",
+                transform=axes[idx, 1].transAxes,
+                verticalalignment="top",
+                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
+            )
+
+            # Plot 3: Residuals
+            residuals = y_test - y_pred
+            axes[idx, 2].scatter(y_pred, residuals, alpha=0.6, s=30, color=color)
+            axes[idx, 2].axhline(y=0, color="k", linestyle="--", linewidth=2)
+            axes[idx, 2].set_xlabel("Predicción (L)")
+            axes[idx, 2].set_ylabel("Residual (L)")
+            axes[idx, 2].set_title(f"{stage_name} - Residuales")
+            axes[idx, 2].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        if save_path:
+            try:
+                plt.savefig(save_path, dpi=300, bbox_inches="tight")
+                self.logger.info(f"💾 Gráfica guardada en: {save_path}")
+            except Exception as e:
+                self.logger.error(f"❌ Error guardando gráfica: {e}")
+
+        plt.show()
+
+    def get_feature_importance(self, stage="both"):
+        """
+        Extract feature importance from trained models.
+
+        Args:
+            stage: "stage4", "stage8", or "both"
+        """
+        importance_data = {}
+
+        if stage in ["stage4", "both"] and self.model_stage4 is not None:
+            importance_4 = self.model_stage4.feature_importances_
+            importance_data["stage4"] = pd.DataFrame(
+                {"feature": self.features_stage4, "importance": importance_4}
+            ).sort_values("importance", ascending=False)
+
+        if stage in ["stage8", "both"] and self.model_stage8 is not None:
+            importance_8 = self.model_stage8.feature_importances_
+            importance_data["stage8"] = pd.DataFrame(
+                {"feature": self.features_stage8, "importance": importance_8}
+            ).sort_values("importance", ascending=False)
+
+        return importance_data
+
+    def print_feature_importance(self):
+        """Print feature importance for both models."""
+        importance_dict = self.get_feature_importance(stage="both")
+
+        self.logger.info("\n" + "=" * 70)
+        self.logger.info("📊 IMPORTANCIA DE CARACTERÍSTICAS")
+        self.logger.info("=" * 70)
+
+        for stage_key, stage_name in [
+            ("stage4", "Stage 4 (Vacío)"),
+            ("stage8", "Stage 8 (Lleno)"),
+        ]:
+            if stage_key in importance_dict:
+                self.logger.info(f"\n🔍 {stage_name}:")
+                df = importance_dict[stage_key]
+                for _, row in df.head(10).iterrows():
+                    self.logger.info(f"  {row['feature']:<30} {row['importance']:.4f}")
+
+    def save_model(self, base_path: str = "xgboost_dual"):
+        """Save both trained models in JSON format."""
+        path_4 = f"{base_path}_stage4.json"
+        path_8 = f"{base_path}_stage8.json"
+
+        self.model_stage4.get_booster().save_model(path_4)
+        self.model_stage8.get_booster().save_model(path_8)
+
+        self.logger.info(f"💾 Modelo Stage 4 guardado en: {path_4}")
+        self.logger.info(f"💾 Modelo Stage 8 guardado en: {path_8}")
+        self.logger.info(
+            "⚠️  IMPORTANTE: Usar formato JSON para preservar información categórica"
+        )
+
+    def load_model(self, base_path: str = "xgboost_dual"):
+        """Load both trained models from JSON format."""
+        path_4 = f"{base_path}_stage4.json"
+        path_8 = f"{base_path}_stage8.json"
+
+        self.model_stage4.load_model(path_4)
+        self.model_stage8.load_model(path_8)
+
+        self.logger.info(f"✅ Modelo Stage 4 cargado desde: {path_4}")
+        self.logger.info(f"✅ Modelo Stage 8 cargado desde: {path_8}")
+
+    def explain_model(self, stage="both", max_display: int = 15, plots: bool = False):
+        """
+        Generate SHAP-based explanations for the trained models.
+
+        Args:
+            stage: "stage4", "stage8", or "both"
+            max_display: Maximum number of features to display
+            plots: Whether to show SHAP plots
+        """
+        stages_to_explain = []
+        if stage in ["stage4", "both"]:
+            stages_to_explain.append(("stage4", self.model_stage4, "Stage 4 (Vacío)"))
+        if stage in ["stage8", "both"]:
+            stages_to_explain.append(("stage8", self.model_stage8, "Stage 8 (Lleno)"))
+
+        for stage_key, model, stage_name in stages_to_explain:
+            if stage_key not in self.test_data:
+                self.logger.warning(f"⚠️  No hay datos de test para {stage_name}")
+                continue
+
+            self.logger.info(f"\n{'='*70}")
+            self.logger.info(f"🔍 Explicaciones SHAP para {stage_name}")
+            self.logger.info(f"{'='*70}")
+
+            X_test = self.test_data[stage_key]["X"]
+
+            try:
+                explainer = shap.TreeExplainer(
+                    model, feature_perturbation="interventional"
+                )
+                shap_values = explainer.shap_values(X_test, check_additivity=False)
+
+                shap_values_explanation = shap.Explanation(
+                    values=shap_values,
+                    base_values=explainer.expected_value,
+                    data=X_test,
+                    feature_names=list(X_test.columns),
+                )
+
+                shap_importance = np.abs(shap_values).mean(axis=0)
+                importance_df = pd.DataFrame(
+                    {"feature": list(X_test.columns), "mean_abs_shap": shap_importance}
+                ).sort_values("mean_abs_shap", ascending=False)
+
+                self.logger.info(f"\n📊 Top {max_display} variables por SHAP:")
+                for _, row in importance_df.head(max_display).iterrows():
+                    self.logger.info(
+                        f"  {row['feature']:<30} {row['mean_abs_shap']:.4f}"
+                    )
+
+                # Validate additivity
+                shap_sum = shap_values.sum(axis=1) + explainer.expected_value
+                preds = model.predict(X_test)
+                additivity_error = np.abs(shap_sum - preds) / (np.abs(preds) + 1e-8)
+
+                self.logger.info(f"\n📈 Error de aditividad SHAP:")
+                self.logger.info(f"  Media: {additivity_error.mean():.6f}")
+                self.logger.info(f"  Máximo: {additivity_error.max():.6f}")
+
+                if plots:
+                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+
+                    plt.sca(ax1)
+                    shap.summary_plot(
+                        shap_values_explanation.values,
+                        X_test,
+                        feature_names=list(X_test.columns),
+                        show=False,
+                    )
+                    ax1.set_title(f"SHAP Summary - {stage_name}")
+
+                    shap.plots.bar(shap_values_explanation, ax=ax2, show=False)
+                    ax2.set_title(f"SHAP Feature Importance - {stage_name}")
+
+                    plt.tight_layout()
+                    plt.show()
+
+                self.logger.info(f"✅ Explicaciones SHAP calculadas para {stage_name}")
+
+            except Exception as e:
+                self.logger.error(
+                    f"❌ Error calculando SHAP para {stage_name}: {str(e)}"
+                )
+
+    def predict_manual(self, stage: int = None):
+        """
+        Perform manual prediction by entering feature values via console.
+
+        Args:
+            stage: 4 or 8. If None, will ask user to select.
+        """
+        if self.model_stage4 is None or self.model_stage8 is None:
+            self.logger.error("❌ Modelos no entrenados. Ejecute train() primero.")
+            return
+
+        # Ask for stage if not provided
+        if stage is None:
             while True:
                 try:
-                    value = float(input(f"{var}: "))
-                    input_data[var] = value
-                    break
+                    stage = int(
+                        input("\n¿Qué stage desea predecir? (4 = vacío, 8 = lleno): ")
+                    )
+                    if stage in [4, 8]:
+                        break
+                    print("Por favor ingrese 4 u 8")
                 except ValueError:
-                    print("Por favor, ingrese un número válido.")
+                    print("Por favor ingrese un número válido")
 
-        # collect categorical feature inputs
-        for var in self.categorical_vars:
-            value = input(f"{var}: ")
-            input_data[var] = value
+        # Select appropriate model and features
+        if stage == 4:
+            model = self.model_stage4
+            features = self.features_stage4
+            stage_name = "Stage 4 (Camión Vacío)"
+        else:
+            model = self.model_stage8
+            features = self.features_stage8
+            stage_name = "Stage 8 (Camión Lleno)"
 
-        # build dataframe for the entered data
+        self.logger.info(f"\n🔮 Predicción para {stage_name}")
+        self.logger.info(f"Ingrese los valores para las siguientes variables:\n")
+
+        input_data = {}
+
+        # Collect numeric features
+        for var in features:
+            if var in self.numeric_predictor_vars:
+                while True:
+                    try:
+                        value = float(input(f"  {var}: "))
+                        input_data[var] = value
+                        break
+                    except ValueError:
+                        print("    ⚠️  Por favor, ingrese un número válido")
+
+        # Collect categorical features
+        for var in features:
+            if var in self.categorical_vars:
+                value = input(f"  {var}: ")
+                input_data[var] = value
+
+        # Build DataFrame
         input_df = pd.DataFrame([input_data])
 
-        # separe numeric and categorical
-        X_num = input_df[self.numeric_predictor_vars]
-        X_cat = input_df[self.categorical_vars]
-
-        # convert categorical columns to 'category' dtype
+        # Convert categorical columns
         for cat_col in self.categorical_vars:
-            X_cat[cat_col] = X_cat[cat_col].astype("category")
+            if cat_col in input_df.columns:
+                input_df[cat_col] = input_df[cat_col].astype("category")
 
-        # conbine numeric and categorical features
-        X_final = pd.concat([X_num, X_cat], axis=1)
+        # Make prediction
+        prediction = model.predict(input_df)
 
-        # run predictions
-        prediction = self.model.predict(X_final)
-
-        self.logger.info(
-            f"\n Predicción de consumo de combustible: {prediction[0]:.2f} litros"
-        )
+        self.logger.info(f"\n✅ Predicción de consumo: {prediction[0]:.2f} litros")
         return prediction[0]
 
+    def compare_models_performance(self, results: dict):
+        """
+        Generate a comprehensive comparison report between Stage 4 and Stage 8 models.
+        """
+        if "stage4" not in results or "stage8" not in results:
+            self.logger.error("❌ Resultados incompletos para comparación")
+            return
 
-if __name__ == "__main__":
-    # Variables predictoras
-    numeric_predictor_vars = [
-        "AvgSlopePercent",
-        "TotalMeasuredTonnage",
-        "Distance",
-        "CycleDurationSeconds",
-        "StageSequence",
-        "TimeEfficiencyPercentage",
-    ]
+        self.logger.info("\n" + "=" * 80)
+        self.logger.info("📊 REPORTE COMPARATIVO DE MODELOS")
+        self.logger.info("=" * 80)
 
-    # ✨ Todas las categóricas en una sola lista - XGBoost decide el mejor encoding
-    categorical_vars = ["Destination", "DestinationType", "Material", "Shovel"]
+        metrics_4 = results["stage4"]["metrics"]
+        metrics_8 = results["stage8"]["metrics"]
+        samples_4 = results["stage4"]["samples"]
+        samples_8 = results["stage8"]["samples"]
 
-    # Crear modelo con soporte nativo
-    model = XGBoostModel(
-        numeric_predictor_vars=numeric_predictor_vars,
-        categorical_vars=categorical_vars,
-        max_cat_to_onehot=4,  # <= 4 categorías: one-hot, > 4: optimal partitioning
-    )
+        # Data distribution
+        self.logger.info("\n📦 Distribución de Datos:")
+        self.logger.info(
+            f"  Stage 4: {samples_4['train']} train, {samples_4['test']} test"
+        )
+        self.logger.info(
+            f"  Stage 8: {samples_8['train']} train, {samples_8['test']} test"
+        )
 
-    try:
-        # Pipeline de entrenamiento
-        print("🚀 Iniciando entrenamiento con XGBoost Native Categorical Support")
+        # Metrics comparison
+        self.logger.info("\n📈 Comparación de Métricas:")
+        self.logger.info(
+            f"{'Métrica':<20} {'Stage 4':>15} {'Stage 8':>15} {'Diferencia':>15}"
+        )
+        self.logger.info("-" * 80)
 
-        model.load_data()
-        model.transform_cycles_data()
-        resultados = model.train()
+        for metric in ["R2", "MAE", "RMSE", "MAPE_Safe", "MedianAE"]:
+            val_4 = metrics_4[metric]
+            val_8 = metrics_8[metric]
+            diff = val_8 - val_4
 
-        # almacenar el modelo en un csv
-        cycles_with_predictions = model.get_predictions()
+            if metric == "R2":
+                better = "✅ Stage 8" if val_8 > val_4 else "✅ Stage 4"
+            else:
+                better = "✅ Stage 4" if val_4 < val_8 else "✅ Stage 8"
 
-        # Para guardar en CSV
-        cycles_with_predictions.write_csv("xgboost_predictions.csv")
+            self.logger.info(
+                f"{metric:<20} {val_4:>15.4f} {val_8:>15.4f} {diff:>15.4f} {better}"
+            )
 
-        # model.print_feature_importance()
-        model.explain_model(plots=True)
-        # model.predict_manual()
+        # Features comparison
+        self.logger.info("\n🔍 Comparación de Features:")
+        self.logger.info(f"  Stage 4 features: {len(self.features_stage4)}")
+        self.logger.info(f"  Stage 8 features: {len(self.features_stage8)}")
 
-        # model.plot_predictions("xgboost_predictions.png", resultados)
-        # model.save_model()
+        common_features = set(self.features_stage4) & set(self.features_stage8)
+        unique_4 = set(self.features_stage4) - set(self.features_stage8)
+        unique_8 = set(self.features_stage8) - set(self.features_stage4)
 
-    except Exception as e:
-        print(f"❌ Error durante la ejecución: {e}")
-        import traceback
+        self.logger.info(
+            f"\n  Comunes: {len(common_features)} - {list(common_features)}"
+        )
+        self.logger.info(f"  Únicas Stage 4: {len(unique_4)} - {list(unique_4)}")
+        self.logger.info(f"  Únicas Stage 8: {len(unique_8)} - {list(unique_8)}")
 
-        traceback.print_exc()
+        # Best iteration comparison
+        self.logger.info("\n⚙️  Convergencia:")
+        self.logger.info(
+            f"  Stage 4 best iteration: {self.model_stage4.best_iteration}"
+        )
+        self.logger.info(
+            f"  Stage 8 best iteration: {self.model_stage8.best_iteration}"
+        )
+
+        self.logger.info("\n" + "=" * 80)

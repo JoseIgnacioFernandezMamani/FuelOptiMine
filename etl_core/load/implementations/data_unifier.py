@@ -502,11 +502,7 @@ class DataUnifier:
             )
         ).sort("SortTimestamp")
 
-        # 8. apply fill strategies and business logic
-        df_unified = self._apply_fill_strategies(df_unified)
-        df_unified = self._apply_business_logic(df_unified)
-
-        # 9. devolver el estado de timestamp de cyclo a su estado original
+        # 8. devolver el estado de timestamp de cyclo a su estado original
         df_unified = df_unified.with_columns(
             [
                 pl.when(pl.col("StageSequence") == 1)
@@ -520,5 +516,51 @@ class DataUnifier:
             ]
         )
 
+        # 9. apply fill strategies and business logic
+        df_unified = self._apply_fill_strategies(df_unified)
+        df_unified = self._apply_business_logic(df_unified)
+
+        # df_unified = df_unified.select(sorted(df_unified.columns))
+
         logger.info(f"Unificación completada. Filas resultantes: {len(df_unified)}")
-        return df_unified.unique()
+        return df_unified.unique(maintain_order=True)
+
+
+if __name__ == "__main__":
+    truck_id = "T-210"
+    output_file = "xboost_fuel_T210.csv"
+
+    try:
+        logger.info(f"Procesando {truck_id}")
+
+        # 1. EXTRACCIÓN
+        logger.info("Extrayendo datos...")
+        extractor = CSVExtractor("train_data", truck_id)
+        raw_data = extractor.load_data()
+
+        # 2. TRANSFORMACIÓN
+        logger.info("Transformando datos...")
+        sensor_transformer = SensorTransformer(truck_id=truck_id)
+        cycle_transformer = CycleTransformer()
+        time_model_transformer = TimeModelTransformer()
+
+        df_sensor = sensor_transformer.run_transform(raw_data["sensor"])
+        df_cycle = cycle_transformer.run_transform(raw_data["cycle"])
+        df_time_model = time_model_transformer.run_transform(raw_data["time_model"])
+
+        # 3. UNIFICACIÓN
+        logger.info("Unificando datos...")
+        unifier = DataUnifier(max_tolerance_days=365)
+        df_unified = unifier.unify(df_sensor, df_time_model, df_cycle)
+
+        # 4. GUARDAR CSV
+        logger.info(f"Guardando en {output_file}...")
+        df_unified.write_csv(output_file)
+
+        logger.info(
+            f"✓ Completado: {len(df_unified):,} filas guardadas en {output_file}"
+        )
+
+    except Exception as e:
+        logger.error(f"Error: {str(e)}")
+        raise
