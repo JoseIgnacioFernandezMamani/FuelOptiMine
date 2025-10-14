@@ -18,8 +18,12 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from typing import Tuple, Optional
+import folium
+from folium import plugins
+from streamlit_folium import st_folium
 from etl_core.load.utils import create_client, CH_CONFIG
 from model.predictive.mlflow_config import TRUCK_IDS
+from model.predictive.report_generator import ReportGenerator
 
 # MLflow configuration
 MLFLOW_TRACKING_URI = "http://localhost:5000"
@@ -72,8 +76,6 @@ def load_models_from_mlflow(truck_id: str) -> Tuple[Optional[object], Optional[o
             f"models:/{truck_id}_stage8_fuel/Production"
         )
 
-        print("exito")
-
         return model_stage4, model_stage8
 
     except Exception as e:
@@ -115,7 +117,13 @@ def load_data_from_clickhouse(truck_id: str) -> Optional[pl.DataFrame]:
             StageSequence,
             TimeStampIni,
             TimeStampFin,
-            CycleId
+            CycleId,
+            Latitude,
+            Longitude,
+            Elevation,
+            Latitude_cycle,
+            Longitude_cycle,
+            Elevation_cycle
         FROM fuel_optimine.xgboost_fuel
         WHERE Equipment = '{truck_id}'
           AND StageSequence IN (4, 8)
@@ -123,10 +131,36 @@ def load_data_from_clickhouse(truck_id: str) -> Optional[pl.DataFrame]:
         """
 
         data = client.query_df(query)
-
         df = pl.from_pandas(data)
 
-        # Calculate CycleDurationSeconds  and PredictedFuel
+        # Apply fallback logic: use cycle coordinates if available, else use sensor coordinates
+        df = df.with_columns(
+            [
+                pl.when(
+                    (pl.col("Latitude_cycle").is_not_null())
+                    & (pl.col("Latitude_cycle") != 0)
+                )
+                .then(pl.col("Latitude_cycle"))
+                .otherwise(pl.col("Latitude"))
+                .alias("Latitude"),
+                pl.when(
+                    (pl.col("Longitude_cycle").is_not_null())
+                    & (pl.col("Longitude_cycle") != 0)
+                )
+                .then(pl.col("Longitude_cycle"))
+                .otherwise(pl.col("Longitude"))
+                .alias("Longitude"),
+                pl.when(
+                    (pl.col("Elevation_cycle").is_not_null())
+                    & (pl.col("Elevation_cycle") != 0)
+                )
+                .then(pl.col("Elevation_cycle"))
+                .otherwise(pl.col("Elevation"))
+                .alias("Elevation"),
+            ]
+        ).drop(["Latitude_cycle", "Longitude_cycle", "Elevation_cycle"])
+
+        # Calculate CycleDurationSeconds and TotalMeasuredTonnage
         df = df.with_columns(
             [
                 (pl.col("TimeStampFin") - pl.col("TimeStampIni"))
@@ -136,7 +170,6 @@ def load_data_from_clickhouse(truck_id: str) -> Optional[pl.DataFrame]:
             ]
         )
 
-        print(df.head(5))
         return df
 
     except Exception as e:
@@ -187,17 +220,14 @@ def generate_predictions(
 
         predictions[mask_8] = model_stage8.predict(X_stage8)
 
-    # Add predictions to DataFrame
-    result = df.with_columns(
-        [
-            pl.Series("PredictedFuel", predictions),
-        ]
-    )
-    # Calculate
+    # Add predictions to DataFrame (with geographic data preserved)
+    result = df.with_columns([pl.Series("PredictedFuel", predictions)])
+
     return result
 
 
 def plot_time_series_predictions_only(df: pl.DataFrame):
+    """Plot time series of predicted fuel consumption."""
     df_sorted = df.sort("TimeStamp").to_pandas()
     fig = go.Figure()
 
@@ -212,7 +242,7 @@ def plot_time_series_predictions_only(df: pl.DataFrame):
         )
     )
 
-    # Colorear puntos por etapa
+    # Color by stage
     colors = {4: "lightblue", 8: "orange"}
     for stage in [4, 8]:
         stage_data = df_sorted[df_sorted["StageSequence"] == stage]
@@ -240,6 +270,7 @@ def plot_time_series_predictions_only(df: pl.DataFrame):
 
 
 def plot_fuel_distribution_by_stage(df: pl.DataFrame):
+    """Box plot of fuel distribution by stage."""
     df_pd = df.to_pandas()
     fig = px.box(
         df_pd,
@@ -255,6 +286,7 @@ def plot_fuel_distribution_by_stage(df: pl.DataFrame):
 
 
 def show_prediction_summary(df: pl.DataFrame):
+    """Display summary statistics table."""
     summary = (
         df.group_by("StageSequence")
         .agg(
@@ -273,11 +305,12 @@ def show_prediction_summary(df: pl.DataFrame):
     summary = summary[
         ["Stage", "Cycles", "Mean_Predicted_Fuel", "Std_Predicted_Fuel", "Min", "Max"]
     ]
-    st.subheader("📊 Prediction Summary by Stage")
+    st.subheader("Prediction Summary by Stage")
     st.dataframe(summary.round(3), use_container_width=True)
 
 
 def plot_prediction_vs_numeric(df: pl.DataFrame, stage: int):
+    """Scatter plots of predictions vs numeric features."""
     df_stage = df.filter(pl.col("StageSequence") == stage).to_pandas()
     if df_stage.empty:
         st.warning(f"No data for Stage {stage}")
@@ -290,7 +323,7 @@ def plot_prediction_vs_numeric(df: pl.DataFrame, stage: int):
     if not numeric_vars:
         return
 
-    vars_to_plot = numeric_vars[:4]  # Limitar a 4 para claridad
+    vars_to_plot = numeric_vars[:4]
     cols = st.columns(len(vars_to_plot))
     for i, col in enumerate(vars_to_plot):
         with cols[i]:
@@ -307,6 +340,7 @@ def plot_prediction_vs_numeric(df: pl.DataFrame, stage: int):
 
 
 def plot_fuel_by_category(df: pl.DataFrame, stage: int):
+    """Bar charts of fuel by categorical features."""
     df_stage = df.filter(pl.col("StageSequence") == stage).to_pandas()
     if df_stage.empty:
         return
@@ -322,7 +356,7 @@ def plot_fuel_by_category(df: pl.DataFrame, stage: int):
     if not cat_vars:
         return
 
-    for cat_col in cat_vars[:3]:  # Máximo 3 categorías
+    for cat_col in cat_vars[:3]:
         avg_fuel = (
             df_stage.groupby(cat_col, as_index=False)["PredictedFuel"]
             .mean()
@@ -342,16 +376,98 @@ def plot_fuel_by_category(df: pl.DataFrame, stage: int):
         st.plotly_chart(fig, use_container_width=True)
 
 
-# ───────────────────────────────────────────────
-# FUNCIÓN PRINCIPAL
-# ───────────────────────────────────────────────
+def plot_fuel_consumption_heatmap(df: pl.DataFrame):
+    """
+    Create interactive geospatial heatmap showing fuel consumption hotspots.
+    Only shows top consumption points to improve performance.
+    """
+    df_pandas = df.to_pandas()
+
+    # Filter valid coordinates
+    df_geo = df_pandas[
+        (df_pandas["Latitude"].notna())
+        & (df_pandas["Longitude"].notna())
+        & (df_pandas["Latitude"] != 0)
+        & (df_pandas["Longitude"] != 0)
+        & (df_pandas["PredictedFuel"] > 0)
+    ].copy()
+
+    if len(df_geo) == 0:
+        st.warning("No valid geographic data available for heatmap")
+        return
+
+    # Limit to top 200 points for performance (adjust as needed)
+    df_geo_top = df_geo.nlargest(200, "PredictedFuel")
+
+    # Calculate center
+    center_lat = df_geo_top["Latitude"].mean()
+    center_lon = df_geo_top["Longitude"].mean()
+
+    # Create base map
+    m = folium.Map(
+        location=[center_lat, center_lon], zoom_start=13, tiles="OpenStreetMap"
+    )
+
+    # Prepare heatmap data: [lat, lon, weight] - only top points
+    heat_data = [
+        [row["Latitude"], row["Longitude"], row["PredictedFuel"]]
+        for _, row in df_geo_top.iterrows()
+    ]
+
+    # Add heatmap layer
+    plugins.HeatMap(
+        heat_data,
+        min_opacity=0.4,
+        max_zoom=18,
+        radius=20,
+        blur=25,
+        gradient={0.0: "blue", 0.3: "lime", 0.5: "yellow", 0.7: "orange", 1.0: "red"},
+    ).add_to(m)
+
+    # Add top 10 consumption points as red markers
+    top_10 = df_geo_top.head(10)
+
+    for idx, row in top_10.iterrows():
+        folium.CircleMarker(
+            location=[row["Latitude"], row["Longitude"]],
+            radius=10,
+            popup=folium.Popup(
+                f"<b>Fuel:</b> {row['PredictedFuel']:.2f}L<br>"
+                f"<b>Stage:</b> {row['StageSequence']}<br>"
+                f"<b>Dest:</b> {row['Destination']}<br>"
+                f"<b>Distance:</b> {row['Distance']:.0f}m",
+                max_width=200,
+            ),
+            color="darkred",
+            fill=True,
+            fillColor="red",
+            fillOpacity=0.8,
+            weight=2,
+        ).add_to(m)
+
+    # Display map
+    st_folium(m, width=None, height=600)
+
+    # Summary statistics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total puntos geoespaciales", f"{len(df_geo):,}")
+    with col2:
+        st.metric("Puntos en el mapa de calor", f"{len(df_geo_top):,}")
+    with col3:
+        st.metric(
+            "Consumo maximo encontrado:", f"{df_geo['PredictedFuel'].max():.2f} L"
+        )
+    with col4:
+        avg_fuel = df_geo["PredictedFuel"].mean()
+        st.metric("Consumo promedio:", f"{avg_fuel:.2f} L")
 
 
 def show():
-    st.title("⛽ XGBoost Fuel Consumption Predictions from MLflow")
+    st.title("XGBoost Fuel Consumption Predictions from MLflow")
 
     with st.sidebar:
-        st.header("🚚 Truck Selection")
+        st.header("Truck Selection")
         truck_id = st.selectbox("Select Truck ID:", options=TRUCK_IDS, index=0)
 
     # Load models
@@ -364,7 +480,7 @@ def show():
         )
         st.stop()
 
-    st.success(f"✅ Models loaded successfully for {truck_id}")
+    st.success(f"Models loaded successfully for {truck_id}")
 
     # Load data
     with st.spinner(f"Loading operational data for {truck_id}..."):
@@ -374,21 +490,22 @@ def show():
         st.error("No data available for selected truck.")
         st.stop()
 
-    st.success(f"✅ Loaded {len(df):,} operational records")
+    st.success(f"Loaded {len(df):,} operational records")
 
     # Generate predictions
     with st.spinner("Generating predictions..."):
         df_predictions = generate_predictions(df, model_stage4, model_stage8)
 
     # Display results
-    st.header("📊 Prediction Insights")
+    st.header("Prediction Insights")
 
-    tab1, tab2, tab3, tab4 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
         [
-            "📈 Time Series",
-            "📉 Distribution & Summary",
-            "🔍 Stage 4 (Empty Truck)",
-            "🔍 Stage 8 (Loaded Truck)",
+            "Time Series",
+            "Distribution & Summary",
+            "Stage 4 (Empty Truck)",
+            "Stage 8 (Loaded Truck)",
+            "Geospatial Heatmap",
         ]
     )
 
@@ -411,8 +528,15 @@ def show():
         plot_prediction_vs_numeric(df_predictions, stage=8)
         plot_fuel_by_category(df_predictions, stage=8)
 
+    with tab5:
+        st.subheader("Fuel Consumption Heatmap")
+        st.info(
+            "Red areas indicate higher fuel consumption. Red markers show top 10 consumption points."
+        )
+        plot_fuel_consumption_heatmap(df_predictions)
+
     # Data preview
-    with st.expander("📋 View Prediction Data"):
+    with st.expander("View Prediction Data"):
         display_cols = [
             "TimeStamp",
             "StageSequence",
@@ -423,6 +547,9 @@ def show():
             "Destination",
             "Material",
             "Shovel",
+            "Latitude",
+            "Longitude",
+            "Elevation",
         ]
         available_cols = [col for col in display_cols if col in df_predictions.columns]
         st.dataframe(

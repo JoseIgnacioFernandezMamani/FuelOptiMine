@@ -25,6 +25,7 @@ class SensorDataEDA:
         """Get the loaded DataFrame"""
         if not self._data_loaded:
             raise RuntimeError("Primero ejecute run()")
+
         return self.sensor_df
 
     def _load_sensor_data(self):
@@ -102,7 +103,18 @@ class SensorDataEDA:
                     "last_record": max_date.strftime("%Y-%m-%d %H:%M:%S"),
                     "total_duration": (max_date - min_date).total_seconds(),
                 }
-            elif col_type in [pl.Float64, pl.Int64]:
+            elif col_type in [
+                pl.Float64,
+                pl.Float32,
+                pl.Int64,
+                pl.Int32,
+                pl.Int16,
+                pl.Int8,
+                pl.UInt64,
+                pl.UInt32,
+                pl.UInt16,
+                pl.UInt8,
+            ]:
                 q1 = df[col].quantile(0.25)
                 q3 = df[col].quantile(0.75)
 
@@ -247,7 +259,7 @@ class SensorDataEDA:
             "Acceleration",
             "SlopePercent",
             "TimeDiffSeconds",
-            "DeltaFuel",
+            "DeltaFuelLevelLiters",
         ]
 
         valid_columns = []
