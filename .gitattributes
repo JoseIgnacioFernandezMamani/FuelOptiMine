@@ -1,6 +1,5 @@
 # Global settings: Normalize line endings automatically
 * text=auto eol=lf
-
 # Ensure all text files use LF in the repository
 # but are converted according to local settings upon checkout
 *.txt text
@@ -13,30 +12,25 @@
 *.css text
 *.js text
 *.py text
-
 # For Python-specific files
 *.py text diff=python eol=lf
 *.pyx text diff=python eol=lf
 *.pxd text diff=python eol=lf
 *.ipynb text eol=lf
-
 # Configuration files
 *.toml text eol=lf
 *.ini text eol=lf
 *.cfg text eol=lf
 requirements.txt text eol=lf
 Makefile text eol=lf
-
 # Shell scripts should always use LF
 *.sh text eol=lf
 *.bash text eol=lf
 *.zsh text eol=lf
-
 # Windows scripts use CRLF
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
-
 # Binary files should never be modified
 *.png binary
 *.jpg binary
@@ -49,7 +43,6 @@ Makefile text eol=lf
 *.eot binary
 *.ttf binary
 *.otf binary
-
 # Binary data files
 *.parquet binary
 *.pkl binary
@@ -58,15 +51,13 @@ Makefile text eol=lf
 *.joblib binary
 *.pt binary
 *.pth binary
-
 # Office files as binaries
-*.xlsx binary
+*.xlsx filter=lfs diff=lfs merge=lfs -text
 *.xls binary
 *.docx binary
 *.doc binary
 *.pptx binary
 *.pdf binary
-
 # Compiled Python files
 *.pyc binary
 *.pyo binary

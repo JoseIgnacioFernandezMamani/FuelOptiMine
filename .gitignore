@@ -36,6 +36,7 @@ data-set/**/*.parquet
 data-set/**/*.json
 data-set/**/*.pkl
 *.csv
+*.xlsx
 
 # Saved model (heavy files)
 model/predictive/**/registry/*
