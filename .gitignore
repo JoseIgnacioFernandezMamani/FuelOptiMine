@@ -113,3 +113,11 @@ mlflow_server/backend/
 mlflow_server/artifacts/
 mlflow_server/logs/
 *.db
+
+# office files
+*.xlsx
+*.xls
+*.docx
+*.doc
+*.pptx
+*.pdf

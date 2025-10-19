@@ -51,13 +51,7 @@ Makefile text eol=lf
 *.joblib binary
 *.pt binary
 *.pth binary
-# Office files as binaries
-*.xlsx filter=lfs diff=lfs merge=lfs -text
-*.xls binary
-*.docx binary
-*.doc binary
-*.pptx binary
-*.pdf binary
+
 # Compiled Python files
 *.pyc binary
 *.pyo binary
