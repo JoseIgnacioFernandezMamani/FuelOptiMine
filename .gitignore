@@ -111,3 +111,4 @@ clickhouse/*.tar.gz
 mlflow_server/backend/
 mlflow_server/artifacts/
 mlflow_server/logs/
+*.db
