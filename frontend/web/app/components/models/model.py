@@ -6,6 +6,7 @@ This module:
 - Fetches data from ClickHouse for selected truck
 - Generates predictions using specialized Stage 4 and Stage 8 models
 - Displays interactive visualizations of predictions vs actual values
+
 """
 
 import streamlit as st
@@ -23,7 +24,7 @@ from folium import plugins
 from streamlit_folium import st_folium
 from etl_core.load.utils import create_client, CH_CONFIG
 from model.predictive.mlflow_config import TRUCK_IDS
-from model.predictive.report_generator import ReportGenerator
+from model.predictive.report_generator import add_report_generation_to_ui
 
 # MLflow configuration
 MLFLOW_TRACKING_URI = "http://localhost:5000"
@@ -556,6 +557,10 @@ def show():
             df_predictions.select(available_cols).to_pandas(),
             height=400,
         )
+
+    st.markdown("---")
+    st.markdown("## 📊 Report Generation")
+    add_report_generation_to_ui(df_predictions, truck_id)
 
 
 if __name__ == "__main__":

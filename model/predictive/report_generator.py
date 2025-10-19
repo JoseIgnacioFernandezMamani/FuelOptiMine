@@ -10,10 +10,11 @@ from reportlab.platypus import (
     Table,
     TableStyle,
     Paragraph,
-    Spacer,
     PageBreak,
+    Spacer,
     Image,
 )
+
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from datetime import datetime
