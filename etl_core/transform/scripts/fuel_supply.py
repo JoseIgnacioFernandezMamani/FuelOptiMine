@@ -14,38 +14,7 @@ def run_fuel_supply_etl_for_all_trucks():
     os.makedirs(output_dir, exist_ok=True)
 
     # Filtrar camiones (excluyendo T-210 y T-211)
-    trucks = [
-        "T-210",
-        "T-211",
-        "T-212",
-        "T-213",
-        "T-214",
-        "T-215",
-        "T-216",
-        "T-217",
-        "T-218",
-        "T-219",
-        "T-220",
-        "T-221",
-        "T-222",
-        "T-223",
-        "T-224",
-        "T-225",
-        "T-230",
-        "T-231",
-        "T-232",
-        "T-233",
-        "T-234",
-        "T-235",
-        "T-236",
-        "T-237",
-        "T-238",
-        "T-239",
-        "T-240",
-        "T-241",
-        "T-242",
-        "T-243",
-    ]
+    trucks = ["T-210"]
 
     print(f"🚚 Procesando {len(trucks)} camiones para datos de abastecimiento...")
 
@@ -71,7 +40,7 @@ def run_fuel_supply_etl_for_all_trucks():
             # 4. Mostrar resumen ejecución
             print(f"✅ Dataset transformer ejecutado con exito para {truck_id}")
             print("📋 Primeras 2 filas:")
-            print(df_clean.head(2))
+            print(df_clean.columns)
 
         except Exception as e:
             print(f"❌ Error procesando {truck_id}: {str(e)}")

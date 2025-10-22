@@ -1,15 +1,10 @@
-from etl_core.transform.implementation.sensor.transformer import SensorTransformer
-from etl_core.extract.implementations.local.csv_extractor import CSVExtractor
-from etl_core.transform import (
-    CycleTransformer,
-    SensorTransformer,
-    TimeModelTransformer,
+from etl_core.transform.implementation.fuel_supply.transformer import (
+    FuelSupplyTransformer,
 )
+from etl_core.extract.implementations.local.csv_extractor import CSVExtractor
 from etl_core.load.implementations import ClickHouseLoader
 import sys
-import os
 import logging
-from logging import Logger
 import polars as pl
 import gc
 
@@ -36,50 +31,27 @@ def process_single_truck(truck_id: str, dataset_name: str = "train_data") -> boo
         extractor = CSVExtractor(dataset_name, truck_id)
         raw_data = extractor.load_data()
 
-        # Validar datos
-        required_types = ["sensor", "cycle", "time_model"]
-        for data_type in required_types:
-            if data_type not in raw_data or raw_data[data_type].is_empty():
-                logger.error(f"{truck_id} - Datos '{data_type}' faltantes")
-                return False
+        if "sensor" not in raw_data or raw_data["sensor"].is_empty():
+            logger.error(f"{truck_id} - Datos 'sensor' faltantes")
+            return False
 
         # TRANSFORMACIÓN
-        logger.info(f"{truck_id} - Transformando datos")
+        logger.info(f"{truck_id} - Transformando datos de sensor")
+        supply_transformer = FuelSupplyTransformer()
+        transformed_sensor = supply_transformer.run_transform(raw_data["fuel_supply"])
 
-        transformers = {
-            "sensor": SensorTransformer(truck_id=truck_id),
-            "cycle": CycleTransformer(),
-            "time_model": TimeModelTransformer(),
-        }
+        if transformed_sensor is None or transformed_sensor.is_empty():
+            logger.error(f"{truck_id} - Transformación sensor falló")
+            return False
 
-        transformed_data = {}
-
-        for data_type, transformer in transformers.items():
-            result = transformer.run_transform(raw_data[data_type])
-
-            if result is None or result.is_empty():
-                logger.error(f"{truck_id} - Transformación {data_type} falló")
-                return False
-
-            transformed_data[data_type] = result
-
-            # Limpiar datos raw después de transformar
-            del raw_data[data_type]
-            gc.collect()
-
-        # Limpiar raw_data completamente
+        # Limpiar raw_data
         del raw_data
         gc.collect()
 
         # CARGA
-        logger.info(f"{truck_id} - Cargando a ClickHouse")
-
+        logger.info(f"{truck_id} - Cargando fuel_supply a ClickHouse")
         with ClickHouseLoader(max_tolerance_days=365) as loader:
-            success = loader.load_unified_data(
-                df_sensor=transformed_data["sensor"],
-                df_time_model=transformed_data["time_model"],
-                df_cycle=transformed_data["cycle"],
-            )
+            success = loader.load_fuel_supply_data(transformed_sensor)
 
             if success:
                 metrics = loader.get_metrics()
@@ -97,18 +69,17 @@ def process_single_truck(truck_id: str, dataset_name: str = "train_data") -> boo
 
     finally:
         # Limpieza agresiva de memoria
-        if "transformed_data" in locals():
-            del transformed_data
+        if "transformed_sensor" in locals():
+            del transformed_sensor
         if "extractor" in locals():
             del extractor
-        if "transformers" in locals():
-            del transformers
+        if "sensor_transformer" in locals():
+            del supply_transformer
         gc.collect()
 
 
 def run_all_trucks():
     """Ejecutar ETL para todos los camiones secuencialmente"""
-    # "T-210",
     truck_ids = [
         "T-210",
         "T-233",

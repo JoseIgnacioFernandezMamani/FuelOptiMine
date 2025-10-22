@@ -5,54 +5,54 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 import numpy as np
-
-# Mode configuration (True for development, False for production)
-DEV_MODE = True  # Change to False for production deployment
+from mlflow_server.config import TRUCK_IDS
 
 
 # load data from database
 @st.cache_resource
-def get_analyzer():
-    analyzer = SensorDataEDA(truck_id="T-220")
+def get_analyzer(truck_id: str):
+    analyzer = SensorDataEDA(truck_id=truck_id)
     analyzer.run()
     return analyzer
 
 
-def load_data():
+def load_data(truck_id: str):
     """Load data according to the current mode"""
-    if DEV_MODE:
-        with st.spinner("Cargando datos (modo desarrollo)..."):
-            analyzer = get_analyzer()
-            df = analyzer.get_dataframe()
-            stats = analyzer.get_statistics()
-        return analyzer, df, stats
-    else:
-        if "analyzer" not in st.session_state:
-            with st.spinner("Cargando datos (modo producción)..."):
-                st.session_state.analyzer = get_analyzer()
-                st.session_state.df = st.session_state.analyzer.get_dataframe()
-                st.session_state.stats = st.session_state.analyzer.get_statistics()
-        return (st.session_state.analyzer, st.session_state.df, st.session_state.stats)
+    with st.spinner("Cargando datos (modo desarrollo)..."):
+        analyzer = get_analyzer(truck_id)
+        df = analyzer.get_dataframe()
+        stats = analyzer.get_statistics()
+    return analyzer, df, stats
 
 
 def show():
-    st.title("📊 Análisis Combinado de Combustible")
 
-    if DEV_MODE:
-        st.warning("MODO DESARROLLO ACTIVO - Los datos se recargan en cada cambio")
-    else:
-        st.info("MODO PRODUCCIÓN - Los datos se mantienen en memoria cache")
+    with st.sidebar:
+        st.header("🚚 Elige un camion para analizar")
+        truck_id = st.selectbox(
+            "Selecciona el ID del Camión:",
+            options=TRUCK_IDS,
+            index=0,
+        )
+
+    st.title(f"📊 Análisis Combinado de sensor del camion {truck_id}")
 
     # Load data according to the mode
-    analyzer, df, stats = load_data()
+    analyzer, df, stats = load_data(truck_id)
 
     # Configuración común
     col_config = st.container()
 
     with col_config:
         st.header("Analisis de datos de sensores")
-        tab1, tab2, tab3 = st.tabs(
-            ["📈 Serie Temporal", "📊 Histograma", "📦 Box Plot"]
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(
+            [
+                "📈 Serie Temporal",
+                "📊 Histograma",
+                "📦 Box Plot",
+                "🔗 Matriz Correlación",
+                "⛽ Análisis Recargas",
+            ]
         )
         # tab time series
         with tab1:
@@ -63,7 +63,12 @@ def show():
             # Seleccionar variable a analizar
             grouping_option = st.selectbox(
                 "Seleccionar variable a analizar",
-                ["nivel de combustible", "delta de combustible", "velocidad", "RPM"],
+                [
+                    "nivel de combustible",
+                    "delta de combustible",
+                    "velocidad",
+                    "aceleración",
+                ],
                 index=0,  # Default is "nivel de combustible"
             )
 
@@ -87,11 +92,15 @@ def show():
                     "color": "#ff7f0e",
                 },
                 "velocidad": {
-                    "col": "Speed",
-                    "label": "Velocidad (km/h)",
+                    "col": "SpeedAvg",
+                    "label": "Velocidad Promedio (km/h)",
                     "color": "#2ca02c",
                 },
-                "RPM": {"col": "RPM", "label": "RPM", "color": "#d62728"},
+                "aceleración": {
+                    "col": "Acceleration",
+                    "label": "Aceleración (m/s²)",
+                    "color": "#d62728",
+                },
             }
 
             selected_var = variable_mapping[grouping_option]
@@ -508,6 +517,213 @@ def show():
                             .sort("Period")
                         )
                         st.dataframe(stats_df.to_pandas(), use_container_width=True)
+
+        with tab4:
+            st.subheader("🔗 Matriz de Correlación")
+
+            try:
+                corr_data = analyzer.get_correlation_matrix()
+
+                # Mostrar advertencia si hay columnas excluidas
+                if corr_data.get("excluded_columns"):
+                    with st.expander("⚠️ Columnas excluidas del análisis"):
+                        for exc in corr_data["excluded_columns"]:
+                            st.warning(f"**{exc['column']}**: {exc['reason']}")
+
+                # Métricas principales
+                st.markdown("### 📊 Correlaciones más fuertes")
+
+                # Verificar que hay suficientes pares
+                if len(corr_data["pairs"]) == 0:
+                    st.warning("No hay correlaciones disponibles para mostrar")
+                else:
+                    # Mostrar top 3 (o menos si no hay suficientes)
+                    num_pairs = min(3, len(corr_data["pairs"]))
+                    cols = st.columns(num_pairs)
+
+                    for i in range(num_pairs):
+                        pair = corr_data["pairs"][i]
+                        with cols[i]:
+                            st.metric(
+                                f"{pair['var1']} ↔ {pair['var2']}",
+                                f"{pair['correlation']:.3f}",
+                                delta=None,
+                            )
+
+                    # Heatmap de correlación
+                    fig = go.Figure(
+                        data=go.Heatmap(
+                            z=corr_data["matrix"],
+                            x=corr_data["columns"],
+                            y=corr_data["columns"],
+                            colorscale="RdBu",
+                            zmid=0,
+                            zmin=-1,
+                            zmax=1,
+                            text=[
+                                [f"{val:.2f}" for val in row]
+                                for row in corr_data["matrix"]
+                            ],
+                            texttemplate="%{text}",
+                            textfont={"size": 10},
+                            colorbar=dict(title="Correlación"),
+                        )
+                    )
+
+                    fig.update_layout(
+                        title="Matriz de Correlación de Variables Operacionales",
+                        height=600,
+                        template="plotly_white",
+                        xaxis_title="",
+                        yaxis_title="",
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # Tabla de pares ordenados
+                    with st.expander("📋 Ver todas las correlaciones ordenadas"):
+                        if corr_data["pairs"]:
+                            pairs_df = pl.DataFrame(corr_data["pairs"])
+                            st.dataframe(
+                                pairs_df.to_pandas().style.background_gradient(
+                                    subset=["correlation"],
+                                    cmap="RdBu_r",
+                                    vmin=-1,
+                                    vmax=1,
+                                ),
+                                use_container_width=True,
+                            )
+                        else:
+                            st.info("No hay pares de correlación disponibles")
+
+            except Exception as e:
+                st.error(f"Error al calcular correlaciones: {str(e)}")
+                st.exception(e)
+
+        with tab5:
+            st.subheader("⛽ Análisis de Eventos de Recarga")
+
+            try:
+                refuel_data = analyzer.analyze_refuel_events()
+
+                if refuel_data.get("valid_refuels", 0) == 0:
+                    st.warning("⚠️ No se encontraron eventos de recarga en los datos")
+                else:
+                    # KPIs principales
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric(
+                            "Total Recargas",
+                            f"{refuel_data['valid_refuels']}",
+                            help="Eventos de recarga detectados (DeltaFuel > 50L)",
+                        )
+                    with col2:
+                        st.metric(
+                            "Volumen Total",
+                            f"{refuel_data['total_volume_liters']:,.0f} L",
+                        )
+                    with col3:
+                        st.metric(
+                            "Promedio por Recarga",
+                            f"{refuel_data['avg_volume_liters']:.1f} L",
+                        )
+
+                    # Gráfico de distribución de volúmenes de recarga
+                    col4, col5 = st.columns([2, 1])
+                    with col4:
+                        st.markdown("### 📊 Distribución de Volúmenes de Recarga")
+                        refuel_df = refuel_data["refuel_events_df"]
+
+                        fig_hist = px.histogram(
+                            refuel_df.to_pandas(),
+                            x="DeltaFuel",
+                            nbins=30,
+                            title="Histograma de Volúmenes de Recarga",
+                            labels={
+                                "DeltaFuel": "Volumen (Litros)",
+                                "count": "Frecuencia",
+                            },
+                            color_discrete_sequence=["#2ecc71"],
+                        )
+                        fig_hist.add_vline(
+                            x=refuel_data["avg_volume_liters"],
+                            line_dash="dash",
+                            line_color="red",
+                            annotation_text=f"Media: {refuel_data['avg_volume_liters']:.1f}L",
+                        )
+                        fig_hist.update_layout(height=400, template="plotly_white")
+                        st.plotly_chart(fig_hist, use_container_width=True)
+
+                    # Gráficos comparativos
+                    with col5:
+                        st.markdown("### 🔄 Recargas por Turno")
+                        shift_df = pl.DataFrame(refuel_data["refuels_by_shift"])
+                        fig_shift = px.bar(
+                            shift_df.to_pandas(),
+                            x="Shift",
+                            y="count",
+                            text="count",
+                            title="Cantidad de Recargas por Turno",
+                            color="Shift",
+                            color_discrete_map={"D": "#f39c12", "N": "#3498db"},
+                        )
+                        fig_shift.update_traces(textposition="outside")
+                        fig_shift.update_layout(
+                            height=400, showlegend=False, template="plotly_white"
+                        )
+                        st.plotly_chart(fig_shift, use_container_width=True)
+
+                    # Serie temporal de recargas
+                    st.markdown("### 📅 Serie Temporal de Recargas")
+                    fig_timeline = px.scatter(
+                        refuel_df.to_pandas(),
+                        x="TimeStamp",
+                        y="DeltaFuel",
+                        color="ValidFuel",
+                        size="DeltaFuel",
+                        title="Eventos de Recarga en el Tiempo",
+                        labels={
+                            "TimeStamp": "Fecha y Hora",
+                            "DeltaFuel": "Volumen (Litros)",
+                            "ValidFuel": "Válida",
+                        },
+                        color_discrete_map={0: "#e74c3c", 1: "#27ae60"},
+                        hover_data=["Shift", "BeforeAvg", "AfterAvg"],
+                    )
+                    fig_timeline.update_layout(height=500, template="plotly_white")
+                    st.plotly_chart(fig_timeline, use_container_width=True)
+
+                    # Tabla detallada
+                    with st.expander("📋 Ver tabla detallada de recargas"):
+                        display_df = refuel_df.with_columns(
+                            [
+                                pl.col("TimeStamp")
+                                .dt.strftime("%Y-%m-%d %H:%M")
+                                .alias("Fecha"),
+                                pl.col("Shift").alias("Turno"),
+                                pl.col("DeltaFuel").round(2).alias("Volumen (L)"),
+                                pl.col("BeforeAvg").round(2).alias("Antes (L)"),
+                                pl.col("AfterAvg").round(2).alias("Después (L)"),
+                                pl.col("ValidFuel").cast(pl.Utf8).alias("Válida"),
+                            ]
+                        ).select(
+                            [
+                                "Fecha",
+                                "Turno",
+                                "Volumen (L)",
+                                "Antes (L)",
+                                "Después (L)",
+                                "Válida",
+                            ]
+                        )
+
+                        st.dataframe(
+                            display_df.to_pandas(), use_container_width=True, height=400
+                        )
+
+            except Exception as e:
+                st.error(f"Error al analizar recargas: {str(e)}")
+                st.exception(e)
 
 
 if __name__ == "__main__":

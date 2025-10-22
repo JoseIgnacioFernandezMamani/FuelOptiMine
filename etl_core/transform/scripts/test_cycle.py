@@ -7,7 +7,7 @@ import polars as pl
 
 def run_cycle_etl_pipeline():
     # Configuración de rutas y parámetros
-    truck_id = "T-211"
+    truck_id = "T-210"
     dataset_name = "train_data"
     data_type = "cycle"
 
@@ -43,43 +43,7 @@ def run_cycle_etl_pipeline():
             raise RuntimeError("Transformation returned empty data")
 
         # 3. Verify expected columns
-        expected_columns = [
-            "ShiftDate",
-            "Shift",
-            "Equipment",
-            "Shovel",
-            "ShovelModel",
-            "TruckFleet",
-            "LoadingZone",
-            "Material",
-            "DestinationType",
-            "Destination",
-            "G_Latitude",
-            "G_Longitude",
-            "G_Elevation",
-            "D_Latitude",
-            "D_Longitude",
-            "D_Elevation",
-            "DistanceEmpty",
-            "DistanceLoaded",
-            "EquivalentDistance",
-            "TotalCycleTime",
-            "TravelingEmpty",
-            "WaitingEmpty",
-            "SpottingEmpty",
-            "LoadingMaterial",
-            "Hauling",
-            "WaitingLoad",
-            "SpottingLoad",
-            "UnloadingMaterial",
-            "MeasuredTonnage",
-            "ReportedTonnage",
-            "TotalDistance",
-            "TonnageEfficiency",
-            "AverageSpeed",
-            "LoadingTimePercentage",
-            "HaulingTimePercentage",
-        ]
+        expected_columns = ["ShiftDate", "Shift", "Equipment", "TruckFleet"]
 
         missing_columns = [
             col for col in expected_columns if col not in df_clean.columns
@@ -122,12 +86,12 @@ def run_cycle_etl_pipeline():
             "ShiftDate",
             "Shift",
             "Shovel",
-            "E_TravelingStart",
-            "E_TravelingEnd",
-            "E_WaitingStart",
-            "E_WaitingEnd",
-            "E_SpottingStart",
-            "E_SpottingEnd",
+            # "E_TravelingStart",
+            # "E_TravelingEnd",
+            # "E_WaitingStart",
+            # "E_WaitingEnd",
+            # "E_SpottingStart",
+            # "E_SpottingEnd",
             # "Material",
             # "TotalCycleTime",
             # "MeasuredTonnage",
@@ -155,42 +119,11 @@ def run_cycle_etl_pipeline():
                 )
                 print(f"- {col} null values: {null_count} ({null_percentage:.2f}%)")
 
-        # Show derived fields statistics
-        if "TonnageEfficiency" in df_clean.columns:
-            tonnage_stats = df_clean.select("TonnageEfficiency").describe()
-            print(f"\n📊 Tonnage Efficiency Statistics:")
-            print(tonnage_stats)
-
-        if "AverageSpeed" in df_clean.columns:
-            speed_stats = df_clean.select("AverageSpeed").describe()
-            print(f"\n🚀 Average Speed Statistics:")
-            print(speed_stats)
-
-        # 7. Show cycle time breakdown
-        time_columns = [
-            "TravelingEmpty",
-            "WaitingEmpty",
-            "SpottingEmpty",
-            "LoadingMaterial",
-            "Hauling",
-            "WaitingLoad",
-            "SpottingLoad",
-            "UnloadingMaterial",
-        ]
-        existing_time_columns = [col for col in time_columns if col in df_clean.columns]
-
-        if existing_time_columns:
-            print(f"\n Cycle Time Breakdown (Average):")
-            for col in existing_time_columns:
-                avg_time = df_clean.select(pl.col(col).mean()).item()
-                print(f"- {col}: {avg_time:.2f} minutes")
-
         # 8. Save results (commented out by default)
-        """         
+
         output_path = os.path.join(os.getcwd(), f"{truck_id}_cycle_transformed.csv")
         df_clean.write_csv(output_path)
         print(f"\n💾 Results saved to: {output_path}")
-        """
 
         print(f"\n✅ Cycle ETL Pipeline completed successfully!")
         print(

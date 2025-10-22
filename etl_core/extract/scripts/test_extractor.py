@@ -20,6 +20,13 @@ def main() -> None:
             if not df.is_empty():
                 print(f"   - Muestra:\n{df.head(2)}")
 
+        aux = datasets["sensor"]
+        aux = aux.with_columns(
+            pl.col("RPM").fill_null(0).cast(pl.Float32),
+        )
+        print(
+            f"numero de registros con valor nulo en RPM: {aux.filter(pl.col('RPM') == 0).height}"
+        )
         if unsupported_files:
             print("\n⚠️ Archivos no soportados:")
             for file in unsupported_files:

@@ -1,8 +1,9 @@
 import logging
 import sys
 import os
-from etl_core.load.implementations import ClickHouseInitializer
-from etl_core.load.utils.config import CH_CONFIG, DATASET_CONFIG
+from etl_core.load.implementations import ClickHouseInitializer  # Tu nueva clase
+from etl_core.load.utils.config import CH_CONFIG
+from etl_core.utils.fuel_optimine_table import CREATE_TABLE_XGBOOST_FUEL
 
 # Configurar logging para ver los mensajes
 logging.basicConfig(
@@ -10,70 +11,43 @@ logging.basicConfig(
 )
 
 
-def check_schema_files():
-    """Verifica que los archivos de esquema existan"""
-    print("🔍 Verificando archivos de esquema...")
-
-    missing_schemas = []
-    for dataset_name, config in DATASET_CONFIG.items():
-        schema_path = config["schema_path"]
-
-        # Convertir la ruta del módulo a ruta de archivo
-        file_path = ".".join(schema_path.split(".")[:-1])
-        file_path = file_path.replace(".", "/") + ".py"
-
-        if os.path.exists(file_path):
-            print(f"✅ {dataset_name}: {schema_path} -> {file_path}")
-        else:
-            print(f"❌ {dataset_name}: {schema_path} -> {file_path} (NO EXISTE)")
-            missing_schemas.append(dataset_name)
-
-    if missing_schemas:
-        print(f"⚠️ Esquemas faltantes: {missing_schemas}")
-        print("💡 El test podría fallar en la creación de tablas")
-    else:
-        print("✅ Todos los archivos de esquema encontrados")
-
-    return len(missing_schemas) == 0
-
-
 def test_clickhouse_initializer_connection():
     """Prueba básica de conexión usando ClickHouseInitializer"""
-    print("🔍 Probando conexión básica con ClickHouseInitializer...")
+    print("Probando conexión básica con ClickHouseInitializer...")
 
     try:
         with ClickHouseInitializer() as initializer:
             # Si llegamos aquí, la conexión fue exitosa
-            print("✅ Conexión exitosa con ClickHouseInitializer!")
+            print("Conexión exitosa con ClickHouseInitializer!")
 
             # Verificar que el cliente existe
             assert initializer.client is not None, "Cliente no inicializado"
 
             # Hacer una consulta simple
             result = initializer.client.command("SELECT 1")
-            print(f"📊 Resultado SELECT 1: {result}")
+            print(f"Resultado SELECT 1: {result}")
 
             # Verificar configuración
-            print(f"📊 Base de datos configurada: {initializer.params['database']}")
-            print(f"📊 Host: {initializer.params['host']}")
-            print(f"📊 Puerto: {initializer.params['port']}")
+            print(f"Base de datos configurada: {initializer.params['database']}")
+            print(f"Host: {initializer.params['host']}")
+            print(f"Puerto: {initializer.params['port']}")
 
         return True
 
     except Exception as e:
-        print(f"❌ Error en conexión básica: {e}")
+        print(f"Error en conexión básica: {e}")
         return False
 
 
 def test_create_database():
     """Prueba creación de base de datos"""
-    print("\n🔍 Probando creación de base de datos...")
+    print("\nProbando creación de base de datos...")
 
     try:
         with ClickHouseInitializer() as initializer:
             # Crear la base de datos
             initializer.create_database()
-            print("✅ Base de datos creada/verificada exitosamente!")
+            print("Base de datos creada/verificada exitosamente!")
 
             # Verificar que existe
             databases = initializer.client.query("SHOW DATABASES")
@@ -81,164 +55,217 @@ def test_create_database():
 
             if initializer.params["database"] in db_names:
                 print(
-                    f"✅ Base de datos '{initializer.params['database']}' confirmada en lista"
+                    f"Base de datos '{initializer.params['database']}' confirmada en lista"
                 )
             else:
                 print(
-                    f"⚠️ Base de datos '{initializer.params['database']}' no encontrada en: {db_names}"
+                    f"Base de datos '{initializer.params['database']}' no encontrada en: {db_names}"
                 )
 
         return True
 
     except Exception as e:
-        print(f"❌ Error creando base de datos: {e}")
+        print(f"Error creando base de datos: {e}")
         return False
 
 
-def test_create_single_table():
-    """Prueba creación de una tabla individual"""
-    print("\n🔍 Probando creación de tabla individual (sensor)...")
+def test_create_table_direct():
+    """Prueba creación de tabla usando DDL directo"""
+    print("\nProbando creación de tabla xgboost_fuel...")
 
     try:
         with ClickHouseInitializer() as initializer:
             # Crear la base de datos primero
             initializer.create_database()
 
-            # Intentar crear tabla de sensor (podría fallar si no existe el esquema)
-            try:
-                initializer.create_table("sensor")
-                print("✅ Tabla 'sensor' creada exitosamente!")
+            # Crear tabla usando el DDL
+            initializer.create_table(CREATE_TABLE_XGBOOST_FUEL)
+            print("Tabla 'xgboost_fuel' creada exitosamente!")
 
-                # Verificar que la tabla existe
-                tables = initializer.client.query("SHOW TABLES")
-                table_names = [row[0] for row in tables.result_rows]
-
-                expected_table = DATASET_CONFIG["sensor"]["table_name"]
-                if expected_table in table_names:
-                    print(f"✅ Tabla '{expected_table}' confirmada en lista")
-
-                    # Mostrar estructura de la tabla
-                    desc = initializer.client.query(f"DESCRIBE {expected_table}")
-                    print("📊 Estructura de la tabla:")
-                    for row in desc.result_rows:
-                        print(f"   {row[0]}: {row[1]}")
-                else:
-                    print(f"⚠️ Tabla '{expected_table}' no encontrada en: {table_names}")
-
-            except Exception as schema_error:
-                print(
-                    f"⚠️ Error creando tabla (probablemente falta esquema): {schema_error}"
-                )
-                print("💡 Esto es normal si los archivos de esquema no existen aún")
-                return True  # No fallar el test por esto
-
-        return True
-
-    except Exception as e:
-        print(f"❌ Error creando tabla individual: {e}")
-        return False
-
-
-def test_initialize_all_datasets():
-    """Prueba inicialización completa de todos los datasets"""
-    print("\n🔍 Probando inicialización completa de todos los datasets...")
-
-    try:
-        with ClickHouseInitializer() as initializer:
-            # Intentar inicializar todos los datasets
-            try:
-                initializer.initialize_database()
-                print("✅ Todos los datasets inicializados exitosamente!")
-
-                # Verificar que todas las tablas existen
-                tables = initializer.client.query("SHOW TABLES")
-                table_names = [row[0] for row in tables.result_rows]
-
-                print("📊 Tablas creadas:")
-                created_count = 0
-                for dataset_name, config in DATASET_CONFIG.items():
-                    expected_table = config["table_name"]
-                    if expected_table in table_names:
-                        print(f"   ✅ {dataset_name}: {expected_table}")
-                        created_count += 1
-                    else:
-                        print(f"   ❌ {dataset_name}: {expected_table} - NO ENCONTRADA")
-
-                print(
-                    f"📊 Resumen: {created_count}/{len(DATASET_CONFIG)} tablas creadas"
-                )
-
-            except Exception as init_error:
-                print(
-                    f"⚠️ Error en inicialización (probablemente esquemas faltantes): {init_error}"
-                )
-                print("💡 Esto es normal si los archivos de esquema no existen aún")
-                return True  # No fallar el test por esto
-
-        return True
-
-    except Exception as e:
-        print(f"❌ Error en inicialización completa: {e}")
-        return False
-
-
-def test_initialize_specific_datasets():
-    """Prueba inicialización de datasets específicos"""
-    print("\n🔍 Probando inicialización de datasets específicos...")
-
-    try:
-        # Probar solo con sensor y fuel_supply
-        target_datasets = ["sensor", "fuel_supply"]
-
-        with ClickHouseInitializer() as initializer:
-            initializer.initialize_database(datasets=target_datasets)
-            print(f"✅ Datasets específicos inicializados: {target_datasets}")
-
-            # Verificar solo las tablas solicitadas
-            tables = initializer.client.query("SHOW TABLES")
+            # Verificar que la tabla existe
+            db_name = initializer.params["database"]
+            tables = initializer.client.query(f"SHOW TABLES FROM {db_name}")
             table_names = [row[0] for row in tables.result_rows]
 
-            print("📊 Verificando tablas específicas:")
-            for dataset_name in target_datasets:
-                expected_table = DATASET_CONFIG[dataset_name]["table_name"]
-                if expected_table in table_names:
-                    print(f"   ✅ {dataset_name}: {expected_table}")
+            if "xgboost_fuel" in table_names:
+                print("Tabla 'xgboost_fuel' confirmada en lista")
+
+                # Mostrar estructura de la tabla
+                desc = initializer.client.query(f"DESCRIBE {db_name}.xgboost_fuel")
+                print("Estructura de la tabla:")
+                column_count = 0
+                for row in desc.result_rows:
+                    print(f"   {row[0]}: {row[1]}")
+                    column_count += 1
+                print(f"Total columnas: {column_count}")
+
+                # Verificar algunas columnas clave
+                column_names = [row[0] for row in desc.result_rows]
+                key_columns = [
+                    "Equipment",
+                    "TimeStamp",
+                    "TruckFleet",
+                    "FuelLevelLiters",
+                    "SortTimestamp",
+                ]
+                missing_columns = [
+                    col for col in key_columns if col not in column_names
+                ]
+
+                if missing_columns:
+                    print(f"Columnas clave faltantes: {missing_columns}")
                 else:
-                    print(f"   ❌ {dataset_name}: {expected_table} - NO ENCONTRADA")
+                    print("Todas las columnas clave están presentes")
+
+            else:
+                print(f"Tabla 'xgboost_fuel' no encontrada en: {table_names}")
 
         return True
 
     except Exception as e:
-        print(f"❌ Error en inicialización específica: {e}")
+        print(f"Error creando tabla: {e}")
+        return False
+
+
+def test_initialize_complete():
+    """Prueba inicialización completa de la base de datos"""
+    print("\nProbando inicialización completa...")
+
+    try:
+        with ClickHouseInitializer() as initializer:
+            # Usar el método de inicialización completa
+            initializer.initialize_database()
+            print("Inicialización completa exitosa!")
+
+            # Verificar resultado final
+            db_name = initializer.params["database"]
+            tables = initializer.client.query(f"SHOW TABLES FROM {db_name}")
+            table_names = [row[0] for row in tables.result_rows]
+
+            print(f"Tablas en la base de datos '{db_name}':")
+            for table in table_names:
+                print(f"   - {table}")
+
+            if "xgboost_fuel" in table_names:
+                print("Tabla objetivo 'xgboost_fuel' creada correctamente")
+            else:
+                print("ERROR: Tabla objetivo no encontrada")
+                return False
+
+        return True
+
+    except Exception as e:
+        print(f"Error en inicialización completa: {e}")
+        return False
+
+
+def test_table_structure():
+    """Verifica la estructura detallada de la tabla"""
+    print("\nVerificando estructura detallada de la tabla...")
+
+    try:
+        with ClickHouseInitializer() as initializer:
+            initializer.initialize_database()
+
+            db_name = initializer.params["database"]
+
+            # Obtener información detallada de la tabla
+            desc = initializer.client.query(f"DESCRIBE {db_name}.xgboost_fuel")
+
+            print("Análisis de estructura de tabla:")
+            sensor_cols = time_model_cols = cycle_cols = other_cols = 0
+
+            for row in desc.result_rows:
+                col_name, col_type = row[0], row[1]
+
+                # Clasificar columnas
+                if col_name in [
+                    "Equipment",
+                    "TimeStamp",
+                    "ShiftDate",
+                    "Shift",
+                    "TruckFleet",
+                    "FuelLevelLiters",
+                    "Latitude",
+                    "Longitude",
+                    "Elevation",
+                    "SpeedAvg",
+                    "Acceleration",
+                    "SlopePercent",
+                    "ValidFuel",
+                    "DeltaFuel",
+                    "BeforeAvg",
+                    "AfterAvg",
+                ]:
+                    sensor_cols += 1
+                elif col_name in [
+                    "TimeModelId",
+                    "TimeStamp_tm",
+                    "Status",
+                    "Category",
+                    "Event",
+                ]:
+                    time_model_cols += 1
+                elif "cycle" in col_name.lower() or col_name in [
+                    "CycleId",
+                    "Shovel",
+                    "ShovelModel",
+                    "StageType",
+                    "StageSequence",
+                    "TimeStampIni",
+                    "TimeStampFin",
+                ]:
+                    cycle_cols += 1
+                else:
+                    other_cols += 1
+
+                # Verificar tipos nullable correctos
+                if col_name.startswith(("TimeModel", "Cycle", "Shovel", "Stage")):
+                    if "Nullable" not in col_type:
+                        print(f"   WARNING: {col_name} debería ser Nullable")
+
+            print(f"   Columnas sensor: {sensor_cols}")
+            print(f"   Columnas time model: {time_model_cols}")
+            print(f"   Columnas cycle: {cycle_cols}")
+            print(f"   Otras columnas: {other_cols}")
+            print(
+                f"   Total: {sensor_cols + time_model_cols + cycle_cols + other_cols}"
+            )
+
+        return True
+
+    except Exception as e:
+        print(f"Error verificando estructura: {e}")
         return False
 
 
 def test_error_handling():
     """Prueba manejo de errores"""
-    print("\n🔍 Probando manejo de errores...")
+    print("\nProbando manejo de errores...")
 
     try:
         with ClickHouseInitializer() as initializer:
             initializer.create_database()
 
-            # Intentar crear tabla con dataset inexistente
+            # Intentar crear tabla con DDL inválido
             try:
-                initializer.create_table("dataset_inexistente")
-                print("❌ No se capturó el error esperado")
+                invalid_ddl = "CREATE TABLE invalid_syntax ( invalid )"
+                initializer.create_table(invalid_ddl)
+                print("ERROR: No se capturó el error esperado")
                 return False
-            except ValueError as e:
-                print(f"✅ Error capturado correctamente: {e}")
+            except Exception as e:
+                print(f"Error capturado correctamente: {type(e).__name__}")
 
         return True
 
     except Exception as e:
-        print(f"❌ Error inesperado en prueba de errores: {e}")
+        print(f"Error inesperado en prueba de errores: {e}")
         return False
 
 
 def test_context_manager():
-    """Prueba el context manager (__enter__ y __exit__)"""
-    print("\n🔍 Probando context manager...")
+    """Prueba el context manager"""
+    print("\nProbando context manager...")
 
     try:
         # Verificar que se puede usar with statement
@@ -246,35 +273,54 @@ def test_context_manager():
             assert (
                 initializer.client is not None
             ), "Cliente no inicializado en context manager"
-            print("✅ Context manager funciona correctamente!")
+            print("Context manager funciona correctamente!")
 
-            # El cliente debería cerrarse automáticamente al salir
-
-        # Verificar que la conexión se cerró (esto podría fallar dependiendo de la implementación)
-        print("✅ Context manager completado")
+        print("Context manager completado correctamente")
         return True
 
     except Exception as e:
-        print(f"❌ Error en context manager: {e}")
+        print(f"Error en context manager: {e}")
+        return False
+
+
+def test_custom_params():
+    """Prueba inicialización con parámetros personalizados"""
+    print("\nProbando parámetros personalizados...")
+
+    try:
+        # Usar parámetros personalizados (pero que funcionen)
+        custom_params = {"send_receive_timeout": 600}  # Timeout más largo
+
+        with ClickHouseInitializer(**custom_params) as initializer:
+            # Verificar que los parámetros se aplicaron
+            assert initializer.params["send_receive_timeout"] == 600
+            print("Parámetros personalizados aplicados correctamente")
+
+            # Probar funcionalidad básica
+            initializer.create_database()
+            print("Funcionalidad básica con parámetros personalizados: OK")
+
+        return True
+
+    except Exception as e:
+        print(f"Error con parámetros personalizados: {e}")
         return False
 
 
 def run_all_tests():
-    """Ejecuta todas las pruebas"""
-    print("🚀 Iniciando pruebas completas de ClickHouseInitializer")
+    """Ejecuta todas las pruebas adaptadas"""
+    print("Iniciando pruebas de ClickHouseInitializer simplificado")
     print("=" * 70)
-
-    # Primero verificar esquemas
-    schemas_exist = check_schema_files()
 
     tests = [
         ("Conexión básica", test_clickhouse_initializer_connection),
         ("Creación de BD", test_create_database),
-        ("Tabla individual", test_create_single_table),
-        ("Todos los datasets", test_initialize_all_datasets),
-        ("Datasets específicos", test_initialize_specific_datasets),
+        ("Creación de tabla", test_create_table_direct),
+        ("Inicialización completa", test_initialize_complete),
+        ("Estructura de tabla", test_table_structure),
         ("Manejo de errores", test_error_handling),
         ("Context manager", test_context_manager),
+        ("Parámetros personalizados", test_custom_params),
     ]
 
     results = []
@@ -284,39 +330,31 @@ def run_all_tests():
             success = test_func()
             results.append((test_name, success))
         except Exception as e:
-            print(f"❌ Excepción no controlada en {test_name}: {e}")
+            print(f"Excepción no controlada en {test_name}: {e}")
             results.append((test_name, False))
 
     # Resumen
     print("\n" + "=" * 70)
-    print("📊 RESUMEN DE PRUEBAS:")
+    print("RESUMEN DE PRUEBAS:")
     print("=" * 70)
-
-    if not schemas_exist:
-        print("⚠️ NOTA: Algunos archivos de esquema no existen.")
-        print(
-            "   Las pruebas de creación de tablas podrían no funcionar completamente."
-        )
-        print("   Esto es normal si aún no has creado los esquemas.\n")
 
     passed = 0
     for test_name, success in results:
-        status = "✅ PASÓ" if success else "❌ FALLÓ"
+        status = "PASÓ" if success else "FALLÓ"
         print(f"{status:10} - {test_name}")
         if success:
             passed += 1
 
-    print(f"\n🎯 Resultado final: {passed}/{len(results)} pruebas pasaron")
+    print(f"\nResultado final: {passed}/{len(results)} pruebas pasaron")
 
     if passed == len(results):
-        print("🎉 ¡Todas las pruebas pasaron exitosamente!")
-    elif not schemas_exist and passed >= 4:  # Al menos las pruebas básicas
-        print(
-            "✅ Las pruebas básicas pasaron. Crea los esquemas para pruebas completas."
-        )
+        print("Todas las pruebas pasaron exitosamente!")
+        return True
     else:
-        print("⚠️ Algunas pruebas fallaron. Revisa los logs arriba.")
+        print("Algunas pruebas fallaron. Revisa los logs arriba.")
+        return False
 
 
 if __name__ == "__main__":
-    run_all_tests()
+    success = run_all_tests()
+    sys.exit(0 if success else 1)

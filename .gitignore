@@ -36,6 +36,7 @@ data-set/**/*.parquet
 data-set/**/*.json
 data-set/**/*.pkl
 *.csv
+*.xlsx
 
 # Saved model (heavy files)
 model/predictive/**/registry/*
@@ -106,3 +107,22 @@ clickhouse/*.tar.gz
 *.dll
 *.so
 *.dylib
+
+# mlflow
+mlflow_server/backend/
+mlflow_server/artifacts/
+mlflow_server/logs/
+mlflow_server/mlruns/
+*.db
+
+# office files
+*.xlsx
+*.xls
+*.docx
+*.doc
+*.pptx
+*.pdf
+
+# environment variables
+*.env
+
