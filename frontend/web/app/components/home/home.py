@@ -3,7 +3,7 @@ import polars as pl
 import plotly.graph_objects as go
 import numpy as np
 from etl_core.load.utils import create_client, CH_CONFIG
-from model.predictive.mlflow_config import TRUCK_IDS
+from mlflow_server.config import TRUCK_IDS
 
 
 # load from clickhouse

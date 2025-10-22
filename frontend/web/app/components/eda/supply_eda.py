@@ -7,7 +7,7 @@ import polars as pl
 from analytics.EDA.fuel_supply.fuel_supply_eda import FuelSupplyEDA
 import logging
 from datetime import date
-from model.predictive.mlflow_config import TRUCK_IDS
+from mlflow_server.config import TRUCK_IDS
 
 
 @st.cache_resource

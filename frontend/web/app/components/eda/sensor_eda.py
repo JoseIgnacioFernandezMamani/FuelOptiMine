@@ -5,7 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 import numpy as np
-from model.predictive.mlflow_config import TRUCK_IDS
+from mlflow_server.config import TRUCK_IDS
 
 
 # load data from database

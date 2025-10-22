@@ -112,6 +112,7 @@ clickhouse/*.tar.gz
 mlflow_server/backend/
 mlflow_server/artifacts/
 mlflow_server/logs/
+mlflow_server/mlruns/
 *.db
 
 # office files
@@ -121,3 +122,7 @@ mlflow_server/logs/
 *.doc
 *.pptx
 *.pdf
+
+# environment variables
+*.env
+

@@ -12,11 +12,11 @@ import mlflow
 import mlflow.xgboost
 from mlflow.models import infer_signature
 from .xgboost_model import XGBoostModel
-from .mlflow_config import (
+from mlflow_server.config import (
     MLFLOW_TRACKING_URI,
     TRUCK_IDS,
     NUMERIC_PREDICTOR_VARS,
-    CATEGORICAL_VARS,
+    CATEGORICAL_VARS
 )
 import logging
 from datetime import datetime

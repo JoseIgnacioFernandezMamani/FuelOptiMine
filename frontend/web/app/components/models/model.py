@@ -23,12 +23,12 @@ import folium
 from folium import plugins
 from streamlit_folium import st_folium
 from etl_core.load.utils import create_client, CH_CONFIG
-from model.predictive.mlflow_config import TRUCK_IDS
 from model.predictive.report_generator import add_report_generation_to_ui
-
-# MLflow configuration
-MLFLOW_TRACKING_URI = "http://localhost:5000"
-
+from mlflow_server.config import (
+    TRUCK_IDS,
+    MLFLOW_TRACKING_URI,
+)
+from model.predictive.report_generator import add_report_generation_to_ui
 
 # Feature definitions for each stage
 FEATURES_STAGE4 = {

@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import shap
 from model.predictive.xgboost_model import XGBoostModel
-from model.predictive.mlflow_config import (
+from mlflow_server.config import (
     TRUCK_IDS,
     NUMERIC_PREDICTOR_VARS,
     CATEGORICAL_VARS,

@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 import json
-from model.predictive.mlflow_config import TRUCK_IDS
+from mlflow_server.config import TRUCK_IDS
 
 
 @st.cache_resource
