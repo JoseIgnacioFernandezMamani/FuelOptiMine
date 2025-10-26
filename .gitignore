@@ -124,6 +124,3 @@ mlflow_server/mlruns/
 *.pptx
 *.pdf
 
-# environment variables
-*.env
-

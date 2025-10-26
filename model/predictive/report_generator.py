@@ -638,17 +638,3 @@ class ReportGenerator:
         if output_path:
             with open(output_path, "wb") as f: f.write(pdf_bytes)
         return pdf_bytes
-
-def add_report_generation_to_ui(df_predictions: pl.DataFrame, truck_id: str):
-    import streamlit as st
-    st.header("📄 Generar un Reporte Completo")
-    st.metric("Registros en el Informe", f"{len(df_predictions):,}")
-    if st.button("🎯 Generar Informe PDF", type="primary", use_container_width=True):
-        with st.spinner("Generando informe completo..."):
-            try:
-                pdf_bytes = ReportGenerator(df=df_predictions, truck_id=truck_id, model_metrics=None).generate_pdf_report()
-                st.success("✅ Reporte generado exitosamente!")
-                st.download_button(label="📥 Descargar Reporte PDF", data=pdf_bytes, file_name=f"Fuel_Report_{truck_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf", mime="application/pdf", use_container_width=True)
-            except Exception as e:
-                st.error(f"Error generando reporte: {str(e)}")
-                st.exception(e)
