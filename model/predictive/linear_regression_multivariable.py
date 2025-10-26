@@ -62,7 +62,7 @@ class LinearRegressionModel:
         self.df: pl.DataFrame = pl.DataFrame()
 
         # self.logger
-        self.logger = get_logger("LinearRegression", "lrm.log", console=False)
+        self.logger = get_logger("LinearRegression", "lrm.log", console=True)
 
         # self total consumed
         self.total_consumed: float = 0.0
@@ -946,10 +946,10 @@ class LinearRegressionModel:
         self.logger.info(f"Final predictions dataframe shape: {predictions_df.shape}")
 
         return predictions_df
-
-
+""" 
 if __name__ == "__main__":
     model = LinearRegressionModel()
     results = model.train_models()
     predictions_df = model.get_predictions()
     predictions_df.write_csv("predicted_cycles.csv")
+ """

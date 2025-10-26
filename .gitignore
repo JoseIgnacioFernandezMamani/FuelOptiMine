@@ -1,5 +1,6 @@
 # Virtual environment
-fueloptimine-env/
+fueloptimine-env/*
+fueloptimine-env-old/*
 venv/
 env/
 .env
@@ -122,7 +123,4 @@ mlflow_server/mlruns/
 *.doc
 *.pptx
 *.pdf
-
-# environment variables
-*.env
 

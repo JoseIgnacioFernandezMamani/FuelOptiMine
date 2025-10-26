@@ -90,7 +90,7 @@ def plot_metrics_comparison(results: dict):
         )
 
     fig.update_layout(
-        title_text="Performance Metrics Comparison", height=600, showlegend=False
+        title_text="Métricas de Comparación", height=600, showlegend=False
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -107,7 +107,7 @@ def plot_predictions_scatter(model, stage: int):
     stage_key = "stage4" if stage == 4 else "stage8"
 
     if stage_key not in model.test_data:
-        st.warning(f"No test data available for Stage {stage}")
+        st.warning(f"No hay datos de prueba disponibles para la Etapa {stage}")
         return
 
     data = model.test_data[stage_key]
@@ -203,7 +203,7 @@ def plot_residuals_analysis(model, stage: int):
     fig = make_subplots(
         rows=1,
         cols=2,
-        subplot_titles=("Residuals Distribution", "Residuals vs Predicted"),
+        subplot_titles=("Distribución de Residuales", "Residuales vs Predicción"),
     )
 
     # Histogram
@@ -259,7 +259,7 @@ def plot_feature_importance(model, stage: int):
     stage_key = f"stage{stage}"
 
     if stage_key not in importance_dict:
-        st.warning(f"No importance data for Stage {stage}")
+        st.warning(f"No hay datos de importancia para la Etapa {stage}")
         return
 
     df_importance = importance_dict[stage_key]  # All features, not limited
@@ -302,7 +302,7 @@ def plot_shap_summary(model, stage: int):
     X_test = model.test_data[stage_key]["X"]
 
     try:
-        with st.spinner("Calculating SHAP values..."):
+        with st.spinner("Calculando los valores SHAP..."):
             explainer = shap.TreeExplainer(
                 stage_model, feature_perturbation="interventional"
             )
@@ -436,25 +436,25 @@ def show():
     if "current_truck" not in st.session_state:
         st.session_state.current_truck = None
 
-    st.title("Model Performance Evaluation")
+    st.title("Evaluación del desempeño del modelo")
 
     # Sidebar
     with st.sidebar:
-        st.header("Configuration")
-        truck_id = st.selectbox("Select Truck:", TRUCK_IDS, index=0)
+        st.header("Configuración")
+        truck_id = st.selectbox("Seleccionar camión:", TRUCK_IDS, index=0)
 
-        st.info("This process may take several minutes depending on data volume.")
+        st.info("Este proceso puede tardar varios minutos dependiendo del volumen de datos.")
 
-        if st.button("Train & Evaluate", type="primary", use_container_width=True):
+        if st.button("Entrenar y evaluar", type="primary", use_container_width=True):
             st.session_state.model_trained = True
             st.session_state.current_truck = truck_id
             st.rerun()
 
     # Check if user needs to train first
     if not st.session_state.model_trained:
-        st.info("Click 'Train & Evaluate' in the sidebar to start model evaluation.")
+        st.info("Haga clic en “Entrenar y evaluar” en la barra lateral para iniciar la evaluación del modelo.")
         st.warning(
-            "Note: Training process may take several minutes (5-15 min depending on data size)."
+            "⚠️ Nota: El entrenamiento del modelo puede tardar varios minutos dependiendo del volumen de datos. Por favor, sea paciente. ⚠️"
         )
         st.stop()
 
@@ -471,28 +471,28 @@ def show():
     st.success(f"Model trained for {truck_id}")
 
     # Display overall metrics
-    st.header("Overall Performance Metrics")
+    st.header("Métricas de rendimiento general")
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Total Fuel", f"{results['total_consumed_fuel']:.2f} L")
+        st.metric("Combustible total", f"{results['total_consumed_fuel']:.2f} L")
     with col2:
-        st.metric("Stage 4 Samples", f"{results['stage4']['samples']['test']}")
+        st.metric("Muestras de Etapa 4", f"{results['stage4']['samples']['test']}")
     with col3:
-        st.metric("Stage 8 Samples", f"{results['stage8']['samples']['test']}")
+        st.metric("Muestras de Etapa 8", f"{results['stage8']['samples']['test']}")
     with col4:
         total_samples = (
             results["stage4"]["samples"]["test"] + results["stage8"]["samples"]["test"]
         )
-        st.metric("Total Test Samples", f"{total_samples}")
+        st.metric("Total Muestras de Prueba", f"{total_samples}")
 
     # Metrics comparison
-    st.subheader("Metrics Comparison")
+    st.subheader("Comparación de Métricas")
     display_metrics_table(results)
     plot_metrics_comparison(results)
 
     # Predictions scatter
-    st.header("Predictions vs Actual")
+    st.header("Predicciones vs Reales")
     tab1, tab2 = st.tabs(["Stage 4 (Empty)", "Stage 8 (Loaded)"])
 
     with tab1:
@@ -516,7 +516,7 @@ def show():
             st.metric("MAPE", f"{results['stage8']['metrics']['MAPE_Safe']:.2f}%")
 
     # Residuals Analysis
-    st.header("Residuals Analysis")
+    st.header("Análisis de Residuos")
     tab1, tab2 = st.tabs(["Stage 4 (Empty)", "Stage 8 (Loaded)"])
 
     with tab1:
@@ -526,7 +526,7 @@ def show():
         plot_residuals_analysis(model, stage=8)
 
     # Feature Importance
-    st.header("Feature Importance Analysis")
+    st.header("Análisis de importancia de las características")
     tab1, tab2 = st.tabs(["Stage 4 (Empty)", "Stage 8 (Loaded)"])
 
     with tab1:
@@ -536,7 +536,7 @@ def show():
         plot_feature_importance(model, stage=8)
 
     # SHAP Analysis
-    st.header("SHAP Explainability")
+    st.header("Explicabilidad SHAP")
     tab1, tab2 = st.tabs(["Stage 4 (Empty)", "Stage 8 (Loaded)"])
 
     with tab1:
@@ -546,22 +546,22 @@ def show():
         plot_shap_summary(model, stage=8)
 
     # Time series
-    st.header("Predictions Over Time")
+    st.header("Predicciones a lo largo del tiempo")
     plot_time_series_predictions(predictions_df)
 
     # Feature comparison
-    st.header("Feature Analysis")
+    st.header("Análisis de características")
 
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("Stage 4 Features")
+        st.subheader("Características de la Etapa 4")
         st.write(results["stage4"]["features"])
     with col2:
-        st.subheader("Stage 8 Features")
+        st.subheader("Características de la Etapa 8")
         st.write(results["stage8"]["features"])
 
     # Raw data preview
-    with st.expander("View Predictions Data"):
+    with st.expander("Ver datos de predicciones"):
         st.dataframe(
             predictions_df.select(
                 [

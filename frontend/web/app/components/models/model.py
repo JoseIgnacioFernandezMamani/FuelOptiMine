@@ -80,9 +80,9 @@ def load_models_from_mlflow(truck_id: str) -> Tuple[Optional[object], Optional[o
         return model_stage4, model_stage8
 
     except Exception as e:
-        st.error(f"Error loading models from MLflow: {str(e)}")
+        st.error(f"Error cargando modelos desde MLflow: {str(e)}")
         st.info(
-            "Make sure models are registered and promoted to 'Production' stage in MLflow"
+            "Asegúrese de que los modelos estén registrados y promovidos a la etapa de 'Producción' en MLflow"
         )
         return None, None
 
@@ -174,7 +174,7 @@ def load_data_from_clickhouse(truck_id: str) -> Optional[pl.DataFrame]:
         return df
 
     except Exception as e:
-        st.error(f"Error loading data from ClickHouse: {str(e)}")
+        st.error(f"Error cargando datos de ClickHouse: {str(e)}")
         return None
 
 
@@ -201,12 +201,26 @@ def generate_predictions(
         features = FEATURES_STAGE4["numeric"] + FEATURES_STAGE4["categorical"]
         X_stage4 = df_pandas.loc[mask_4, features].copy()
 
-        # Convert categorical columns
+        # Convert categorical columns and validate they have data
         for cat_col in FEATURES_STAGE4["categorical"]:
             if cat_col in X_stage4.columns:
+                # Remove rows with missing values in this categorical column
+                valid_mask = X_stage4[cat_col].notna() & (X_stage4[cat_col] != '')
+                
+                # Convert to category
                 X_stage4[cat_col] = X_stage4[cat_col].astype("category")
+                
+                # Check if category has valid values
+                if len(X_stage4[cat_col].cat.categories) == 0:
+                    # Add a default category
+                    X_stage4[cat_col] = pd.Categorical(['Unknown'] * len(X_stage4))
 
-        predictions[mask_4] = model_stage4.predict(X_stage4)
+        try:
+            predictions[mask_4] = model_stage4.predict(X_stage4)
+        except Exception as e:
+            st.error(f"Error en la predicción de la Etapa 4: {str(e)}")
+            st.info("Establecer las predicciones de la Etapa 4")
+            predictions[mask_4] = 0
 
     # Predict Stage 8 (loaded truck)
     mask_8 = df_pandas["StageSequence"] == 8
@@ -214,18 +228,36 @@ def generate_predictions(
         features = FEATURES_STAGE8["numeric"] + FEATURES_STAGE8["categorical"]
         X_stage8 = df_pandas.loc[mask_8, features].copy()
 
-        # Convert categorical columns
+        # Convert categorical columns and validate they have data
         for cat_col in FEATURES_STAGE8["categorical"]:
             if cat_col in X_stage8.columns:
+                # Remove rows with missing values in this categorical column
+                valid_mask = X_stage8[cat_col].notna() & (X_stage8[cat_col] != '')
+                
+                if not valid_mask.all():
+                    st.warning(f"Etapa 8: Columna '{cat_col}' tiene {(~valid_mask).sum()} valores faltantes. Rellenando con 'Unknown'.")
+                    X_stage8.loc[~valid_mask, cat_col] = 'Unknown'
+                
+                # Convert to category
                 X_stage8[cat_col] = X_stage8[cat_col].astype("category")
+                
+                # Check if category has valid values
+                if len(X_stage8[cat_col].cat.categories) == 0:
+                    st.error(f"Etapa 8: Columna '{cat_col}' no tiene categorías válidas después de la conversión.")
+                    # Add a default category
+                    X_stage8[cat_col] = pd.Categorical(['Unknown'] * len(X_stage8))
 
-        predictions[mask_8] = model_stage8.predict(X_stage8)
+        try:
+            predictions[mask_8] = model_stage8.predict(X_stage8)
+        except Exception as e:
+            st.error(f"Error en la predicción de la Etapa 8: {str(e)}")
+            st.info("Poniendo las predicciones de la Etapa 8")
+            predictions[mask_8] = 0
 
     # Add predictions to DataFrame (with geographic data preserved)
     result = df.with_columns([pl.Series("PredictedFuel", predictions)])
 
     return result
-
 
 def plot_time_series_predictions_only(df: pl.DataFrame):
     """Plot time series of predicted fuel consumption."""
@@ -306,7 +338,7 @@ def show_prediction_summary(df: pl.DataFrame):
     summary = summary[
         ["Stage", "Cycles", "Mean_Predicted_Fuel", "Std_Predicted_Fuel", "Min", "Max"]
     ]
-    st.subheader("Prediction Summary by Stage")
+    st.subheader("Resumen de predicciones por etapa")
     st.dataframe(summary.round(3), use_container_width=True)
 
 
@@ -394,11 +426,11 @@ def plot_fuel_consumption_heatmap(df: pl.DataFrame):
     ].copy()
 
     if len(df_geo) == 0:
-        st.warning("No valid geographic data available for heatmap")
+        st.warning("No hay datos geográficos válidos disponibles para el mapa de calor")
         return
 
     # Limit to top 200 points for performance (adjust as needed)
-    df_geo_top = df_geo.nlargest(200, "PredictedFuel")
+    df_geo_top = df_geo.nlargest(50, "PredictedFuel")
 
     # Calculate center
     center_lat = df_geo_top["Latitude"].mean()
@@ -465,40 +497,40 @@ def plot_fuel_consumption_heatmap(df: pl.DataFrame):
 
 
 def show():
-    st.title("XGBoost Fuel Consumption Predictions from MLflow")
+    st.title("Modelo de predicciones de consumo de combustible con XGBoost")
 
     with st.sidebar:
         st.header("Truck Selection")
         truck_id = st.selectbox("Select Truck ID:", options=TRUCK_IDS, index=0)
 
     # Load models
-    with st.spinner(f"Loading models for {truck_id} from MLflow..."):
+    with st.spinner(f"Cargando modelos para {truck_id} desde MLflow..."):
         model_stage4, model_stage8 = load_models_from_mlflow(truck_id)
 
     if model_stage4 is None or model_stage8 is None:
         st.error(
-            "Failed to load models. Check MLflow connection and model registration."
+            "No se pudieron cargar los modelos. Verifique la conexión a MLflow y el registro de modelos."
         )
         st.stop()
 
-    st.success(f"Models loaded successfully for {truck_id}")
+    st.success(f"Modelos cargados exitosamente para {truck_id}")
 
     # Load data
-    with st.spinner(f"Loading operational data for {truck_id}..."):
+    with st.spinner(f"Cargando datos operativos para {truck_id}..."):
         df = load_data_from_clickhouse(truck_id)
 
     if df is None or df.is_empty():
-        st.error("No data available for selected truck.")
+        st.error("No hay datos disponibles para el camión seleccionado.")
         st.stop()
 
-    st.success(f"Loaded {len(df):,} operational records")
+    st.success(f"Cargando {len(df):,} registros operativos")
 
     # Generate predictions
-    with st.spinner("Generating predictions..."):
+    with st.spinner("Generando predicciones..."):
         df_predictions = generate_predictions(df, model_stage4, model_stage8)
 
     # Display results
-    st.header("Prediction Insights")
+    st.header("Insights de Predicción")
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(
         [
@@ -511,26 +543,26 @@ def show():
     )
 
     with tab1:
-        st.subheader("Predicted Fuel Over Time")
+        st.subheader("Combustible esperado a lo largo del tiempo")
         plot_time_series_predictions_only(df_predictions)
 
     with tab2:
-        st.subheader("Overall Prediction Behavior")
+        st.subheader("Comportamiento general de las predicciones")
         plot_fuel_distribution_by_stage(df_predictions)
         show_prediction_summary(df_predictions)
 
     with tab3:
-        st.subheader("Stage 4 – Key Relationships")
+        st.subheader("Etapa 4: Relaciones clave")
         plot_prediction_vs_numeric(df_predictions, stage=4)
         plot_fuel_by_category(df_predictions, stage=4)
 
     with tab4:
-        st.subheader("Stage 8 – Key Relationships")
+        st.subheader("Etapa 8: Relaciones clave")
         plot_prediction_vs_numeric(df_predictions, stage=8)
         plot_fuel_by_category(df_predictions, stage=8)
 
     with tab5:
-        st.subheader("Fuel Consumption Heatmap")
+        st.subheader("Mapa de calor del consumo de combustible")
         st.info(
             "Red areas indicate higher fuel consumption. Red markers show top 10 consumption points."
         )
@@ -558,8 +590,7 @@ def show():
             height=400,
         )
 
-    st.markdown("---")
-    st.markdown("## 📊 Report Generation")
+    st.markdown("## 📊 Generación de reportes")
     add_report_generation_to_ui(df_predictions, truck_id)
 
 

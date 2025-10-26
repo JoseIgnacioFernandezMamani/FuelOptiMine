@@ -13,7 +13,7 @@ curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' | s
 ARCH=$(dpkg --print-architecture)
 echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg arch=${ARCH}] https://packages.clickhouse.com/deb stable main" | sudo tee /etc/apt/sources.list.d/clickhouse.list
 sudo apt-get -y update
-sudo apt-get install clickhouse-server=25.6.5.41 clickhouse-client=25.6.5.41 # versiones 25.6.5.41 usadas en el proyecto, asegurese de tener una version similar a 25.*.*.*
+sudo apt-get install clickhouse-server clickhouse-client # versiones 25.6.5.41 usadas en el proyecto, asegurese de tener una version similar a 25.*.*.*
 # poner contrasenia para usuario por defecto= "msc_admin".
 
 # si no tiene systemctl instalar con apt-get install -y systemctl
@@ -113,7 +113,7 @@ clickhouse-client --user=msc_user1 --password=msc_user1_password --database=fuel
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y postgresql-16
+sudo apt-get install -y postgresql # mejor si es postgrest 16
 sudo systemctl enable postgresql
 sudo systemctl start postgresql
 sudo systemctl status postgresql
