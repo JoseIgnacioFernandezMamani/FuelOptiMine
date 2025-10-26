@@ -1,5 +1,6 @@
 # Virtual environment
-fueloptimine-env/
+fueloptimine-env/*
+fueloptimine-env-old/*
 venv/
 env/
 .env
