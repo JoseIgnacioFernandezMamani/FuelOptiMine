@@ -1,0 +1,251 @@
+"""
+Script de diagnóstico completo para rastrear rutas /mnt en MLflow
+Ejecutar: python debug_mlflow_paths.py
+"""
+
+import os
+import sys
+from pathlib import Path
+
+print("=" * 80)
+print("🔍 DIAGNÓSTICO COMPLETO DE RUTAS MLFLOW")
+print("=" * 80)
+
+# ========== 1. VARIABLES DE ENTORNO ==========
+print("\n" + "=" * 80)
+print("1️⃣  VARIABLES DE ENTORNO")
+print("=" * 80)
+
+env_vars = [
+    "PROJECT_ROOT",
+    "MLFLOW_TRACKING_URI", 
+    "MLFLOW_ARTIFACT_ROOT",
+    "MLFLOW_BACKEND_STORE_URI",
+    "MLFLOW_DEFAULT_ARTIFACT_ROOT"
+]
+
+for var in env_vars:
+    value = os.environ.get(var, "❌ NO DEFINIDA")
+    indicator = "🚨 /mnt DETECTADO" if "/mnt" in str(value) else "✅"
+    print(f"{indicator} {var}: {value}")
+
+# ========== 2. CONFIGURACIÓN DEL PROYECTO ==========
+print("\n" + "=" * 80)
+print("2️⃣  CONFIGURACIÓN config.py")
+print("=" * 80)
+
+try:
+    from mlflow_server.config import (
+        PROJECT_ROOT,
+        MLFLOW_TRACKING_URI,
+        MLFLOW_ARTIFACT_ROOT,
+        MLFLOW_BACKEND_STORE_URI,
+        MLFLOW_SERVER_PATH
+    )
+    
+    configs = {
+        "PROJECT_ROOT": PROJECT_ROOT,
+        "MLFLOW_TRACKING_URI": MLFLOW_TRACKING_URI,
+        "MLFLOW_ARTIFACT_ROOT": MLFLOW_ARTIFACT_ROOT,
+        "MLFLOW_BACKEND_STORE_URI": MLFLOW_BACKEND_STORE_URI,
+        "MLFLOW_SERVER_PATH": MLFLOW_SERVER_PATH
+    }
+    
+    for name, value in configs.items():
+        value_str = str(value)
+        indicator = "🚨 /mnt DETECTADO" if "/mnt" in value_str else "✅"
+        exists = ""
+        if "PATH" in name or "ROOT" in name:
+            exists = f" | Existe: {'✅' if Path(value).exists() else '❌'}"
+        print(f"{indicator} {name}: {value_str}{exists}")
+        
+except Exception as e:
+    print(f"❌ Error importando config: {e}")
+
+# ========== 3. BASE DE DATOS POSTGRESQL ==========
+print("\n" + "=" * 80)
+print("3️⃣  RUTAS EN BASE DE DATOS POSTGRESQL")
+print("=" * 80)
+
+try:
+    import psycopg2
+    from mlflow_server.config import (
+        POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, 
+        POSTGRES_USER, POSTGRES_PASSWORD
+    )
+    
+    conn = psycopg2.connect(
+        host=POSTGRES_HOST,
+        port=POSTGRES_PORT,
+        database=POSTGRES_DB,
+        user=POSTGRES_USER,
+        password=POSTGRES_PASSWORD
+    )
+    
+    cursor = conn.cursor()
+    
+    # Experimentos
+    print("\n📊 Experimentos:")
+    cursor.execute("SELECT experiment_id, name, artifact_location FROM experiments")
+    experiments = cursor.fetchall()
+    
+    mnt_found_in_experiments = False
+    for exp_id, name, artifact_loc in experiments:
+        indicator = "🚨" if "/mnt" in str(artifact_loc) else "✅"
+        if "/mnt" in str(artifact_loc):
+            mnt_found_in_experiments = True
+        print(f"{indicator} [{exp_id}] {name}")
+        print(f"     └─ {artifact_loc}")
+    
+    # Runs
+    print("\n🏃 Runs (últimos 5):")
+    cursor.execute("""
+        SELECT run_uuid, experiment_id, artifact_uri 
+        FROM runs 
+        ORDER BY start_time DESC 
+        LIMIT 5
+    """)
+    runs = cursor.fetchall()
+    
+    mnt_found_in_runs = False
+    for run_id, exp_id, artifact_uri in runs:
+        indicator = "🚨" if "/mnt" in str(artifact_uri) else "✅"
+        if "/mnt" in str(artifact_uri):
+            mnt_found_in_runs = True
+        print(f"{indicator} Run {run_id[:8]}... (Exp: {exp_id})")
+        print(f"     └─ {artifact_uri}")
+    
+    # Model Registry
+    print("\n🎯 Model Registry:")
+    cursor.execute("""
+        SELECT mv.name, mv.version, mv.current_stage, mv.source
+        FROM model_versions mv
+        WHERE mv.current_stage = 'Production'
+        ORDER BY mv.name, mv.version
+    """)
+    models = cursor.fetchall()
+    
+    mnt_found_in_models = False
+    if models:
+        for name, version, stage, source in models:
+            indicator = "🚨" if "/mnt" in str(source) else "✅"
+            if "/mnt" in str(source):
+                mnt_found_in_models = True
+            print(f"{indicator} {name} v{version} ({stage})")
+            print(f"     └─ {source}")
+    else:
+        print("❌ No hay modelos en Production")
+    
+    cursor.close()
+    conn.close()
+    
+    # Resumen de PostgreSQL
+    print("\n📋 RESUMEN POSTGRESQL:")
+    if mnt_found_in_experiments:
+        print("🚨 PROBLEMA: Hay rutas /mnt en EXPERIMENTS")
+    if mnt_found_in_runs:
+        print("🚨 PROBLEMA: Hay rutas /mnt en RUNS")
+    if mnt_found_in_models:
+        print("🚨 PROBLEMA: Hay rutas /mnt en MODEL_VERSIONS")
+    if not (mnt_found_in_experiments or mnt_found_in_runs or mnt_found_in_models):
+        print("✅ No se encontraron rutas /mnt en PostgreSQL")
+    
+except Exception as e:
+    print(f"❌ Error consultando PostgreSQL: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ========== 4. MLFLOW CLIENT ==========
+print("\n" + "=" * 80)
+print("4️⃣  MLFLOW CLIENT")
+print("=" * 80)
+
+try:
+    import mlflow
+    from mlflow_server.config import MLFLOW_TRACKING_URI
+    
+    print(f"🔗 Conectando a: {MLFLOW_TRACKING_URI}")
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    client = mlflow.tracking.MlflowClient()
+    
+    # Probar con un truck_id de ejemplo
+    truck_id = "T-210"
+    
+    for stage_name in ["stage4_fuel", "stage8_fuel"]:
+        model_name = f"{truck_id}_{stage_name}"
+        print(f"\n🔍 Buscando modelo: {model_name}")
+        
+        try:
+            versions = client.get_latest_versions(model_name, stages=["Production"])
+            if versions:
+                for v in versions:
+                    indicator = "🚨" if "/mnt" in str(v.source) else "✅"
+                    print(f"{indicator} Versión {v.version}:")
+                    print(f"     ├─ Source: {v.source}")
+                    print(f"     ├─ Run ID: {v.run_id}")
+                    print(f"     └─ Stage: {v.current_stage}")
+                    
+                    # Obtener info del run
+                    try:
+                        run = client.get_run(v.run_id)
+                        artifact_uri = run.info.artifact_uri
+                        indicator2 = "🚨" if "/mnt" in artifact_uri else "✅"
+                        print(f"{indicator2}        └─ Artifact URI: {artifact_uri}")
+                    except Exception as e:
+                        print(f"        └─ ⚠️  No se pudo obtener run info: {e}")
+            else:
+                print(f"❌ No hay versiones en Production")
+        except Exception as e:
+            print(f"❌ Error: {e}")
+    
+except Exception as e:
+    print(f"❌ Error en MLflow Client: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ========== 5. ARCHIVO .env ==========
+print("\n" + "=" * 80)
+print("5️⃣  CONTENIDO DEL ARCHIVO .env")
+print("=" * 80)
+
+env_file = Path(__file__).resolve().parent / ".env"
+if env_file.exists():
+    print(f"📄 Leyendo: {env_file}")
+    with open(env_file, 'r') as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if line and not line.startswith('#'):
+                indicator = "🚨 /mnt DETECTADO" if "/mnt" in line else "✅"
+                print(f"{indicator} Línea {line_num}: {line}")
+else:
+    print(f"❌ No se encontró .env en {env_file}")
+
+# ========== RESUMEN FINAL ==========
+print("\n" + "=" * 80)
+print("📋 RESUMEN Y RECOMENDACIONES")
+print("=" * 80)
+
+print("""
+Si ves 🚨 en alguna sección:
+
+1. VARIABLES DE ENTORNO → Ejecuta: unset VARIABLE_NAME
+
+2. config.py → Verifica que no use os.getenv() con /mnt hardcodeado
+
+3. POSTGRESQL → Ejecuta este SQL:
+   UPDATE experiments 
+   SET artifact_location = REPLACE(artifact_location, '/mnt/d/', 'D:/');
+   
+   UPDATE runs 
+   SET artifact_uri = REPLACE(artifact_uri, '/mnt/d/', 'D:/');
+
+4. MODEL REGISTRY → Necesitas re-registrar los modelos o actualizar:
+   UPDATE model_versions 
+   SET source = REPLACE(source, '/mnt/d/', 'D:/');
+
+5. .env → Elimina o comenta cualquier línea con /mnt/d/
+""")
+
+print("=" * 80)
+print("✅ DIAGNÓSTICO COMPLETO")
+print("=" * 80)

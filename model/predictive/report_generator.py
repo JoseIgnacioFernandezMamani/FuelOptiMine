@@ -437,7 +437,7 @@ class ReportGenerator:
         elements.append(Spacer(1, 0.15 * inch))
 
         kpis = self._calculate_kpis()
-        kpi_table = Table([["Métrica", "Valor"], ["Consumo Total de Combustible", f"{kpis['total_consumption']:.2f} L"], ["Total de Ciclos", f"{kpis['total_cycles']:,}"], ["Consumo Promedio del Ciclo con camión vacío", f"{kpis['avg_consumption_per_cycle_st4']:.2f} L"], ["Consumo Promedio del Ciclo con camión lleno", f"{kpis['avg_consumption_per_cycle_st8']:.2f} L"], ["Error Medio en las predicciones", f"{kpis['mean_error']:.2f} %"], ["Desviación Estándar del Error de las predicciones", f"{kpis['standard_deviation_error']:.2f} %"]], colWidths=[3*inch, 2*inch])
+        kpi_table = Table([["Métrica", "Valor"], ["Consumo Total de Combustible", f"{kpis['total_consumption']:.2f} L"], ["Total de Ciclos", f"{kpis['total_cycles']:,}"], ["Consumo Promedio del Ciclo con camión vacío", f"{kpis['avg_consumption_per_cycle_st4']:.2f} L"], ["Consumo Promedio del Ciclo con camión lleno", f"{kpis['avg_consumption_per_cycle_st8']:.2f} L"], ["Error Medio en las predicciones", f"{kpis['mean_error']:.2f} %"], ["Desviación Estándar del Error en las predicciones", f"{kpis['standard_deviation_error']:.2f} %"]], colWidths=[3*inch, 2*inch])
         kpi_table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), colors.HexColor("#2c5aa0")), ("TEXTCOLOR", (0,0), (-1,0), colors.whitesmoke), ("ALIGN", (0,0), (-1,-1), "LEFT"), ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"), ("FONTSIZE", (0,0), (-1,0), 12), ("BOTTOMPADDING", (0,0), (-1,0), 12), ("BACKGROUND", (0,1), (-1,-1), colors.beige), ("GRID", (0,0), (-1,-1), 1, colors.black)]))
         elements.extend([kpi_table, Spacer(1, 0.3*inch)])
 

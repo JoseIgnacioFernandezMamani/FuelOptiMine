@@ -3,6 +3,28 @@ from pathlib import Path
 import sys
 import os
 
+# ========== DELETE WARNINGS SOON ==========
+import os
+import logging
+import warnings
+
+# Ocultar warnings de Python
+warnings.filterwarnings("ignore")
+
+# Silenciar logs de Streamlit
+logging.getLogger('streamlit.runtime').setLevel(logging.ERROR)
+logging.getLogger('streamlit').setLevel(logging.ERROR)
+
+# Silenciar logs de Plotly y deprecation internos
+logging.getLogger('plotly').setLevel(logging.ERROR)
+logging.getLogger('urllib3').setLevel(logging.ERROR)
+logging.getLogger().setLevel(logging.ERROR)
+
+# También silenciar mensajes que salen directo a la consola
+os.environ["PYTHONWARNINGS"] = "ignore"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+
 # ========== CONFIGURACIÓN DE PATHS SIMPLIFICADA ==========
 def setup_project_path():
     """Configure project path directly and quickly"""
@@ -62,8 +84,6 @@ def lazy_import_heavy_libs():
     from plotly.subplots import make_subplots
     import numpy as np
     import pandas as pd
-    import shap
-    import matplotlib.pyplot as plt
     from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
     from datetime import datetime
     
@@ -76,8 +96,6 @@ def lazy_import_heavy_libs():
         'make_subplots': make_subplots,
         'np': np,
         'pd': pd,
-        'shap': shap,
-        'plt': plt,
         'r2_score': r2_score,
         'mae': mean_absolute_error,
         'mse': mean_squared_error,
@@ -147,7 +165,7 @@ def load_data(truck_id: str):
 
 
 def get_metrics(truck_id: str):
-    """Get model metrics from MLflow"""
+    """Get model metrics from MLflow - FIXED VERSION"""
     libs = lazy_import_heavy_libs()
     mlflow = libs['mlflow']
     
@@ -155,51 +173,69 @@ def get_metrics(truck_id: str):
     try:
         exp = mlflow.get_experiment_by_name(f"{truck_id}_fuel_prediction")
         if not exp:
+            st.warning(f"No se encontró experimento para {truck_id}")
             return None
+        
         runs = mlflow.search_runs(
             experiment_ids=[exp.experiment_id],
             order_by=["start_time DESC"],
             max_results=1
         )
+        
         if runs.empty:
+            st.warning("No se encontraron runs de producción")
             return None
         
         r = runs.iloc[0]
+        
+        # Helper function to safely get metric values
+        def get_metric(key, default=0.0):
+            val = r.get(key, default)
+            if val is None or val == '' or (isinstance(val, float) and val == 0.0):
+                return default
+            return float(val)
+        
+        def get_param(key, default=0):
+            val = r.get(key, default)
+            if val is None or val == '':
+                return default
+            try:
+                return int(float(val))
+            except:
+                return default
+        
         metrics = {
             'stage4': {
                 'metrics': {
-                    'R2': r.get('metrics.stage4_R2', 0),
-                    'MAE': r.get('metrics.stage4_MAE', 0),
-                    'RMSE': r.get('metrics.stage4_RMSE', 0),
-                    'MAPE_Safe': r.get('metrics.stage4_MAPE', 0),
-                    'MedianAE': 0,
-                    'RMSLE': r.get('metrics.stage4_RMSLE', 0),
-                    'ExplainedVar': 0
+                    'R2': get_metric('metrics.stage4_R2'),
+                    'MAE': get_metric('metrics.stage4_MAE'),
+                    'RMSE': get_metric('metrics.stage4_RMSE'),
+                    'MAPE_Safe': get_metric('metrics.stage4_MAPE'),
+                    'RMSLE': get_metric('metrics.stage4_RMSLE')
                 },
                 'samples': {
-                    'train': int(r.get('params.train_samples_stage4', 0)),
-                    'test': int(r.get('params.test_samples_stage4', 0))
+                    'train': get_param('params.train_samples_stage4'),
+                    'test': get_param('params.test_samples_stage4')
                 }
             },
             'stage8': {
                 'metrics': {
-                    'R2': r.get('metrics.stage8_R2', 0),
-                    'MAE': r.get('metrics.stage8_MAE', 0),
-                    'RMSE': r.get('metrics.stage8_RMSE', 0),
-                    'MAPE_Safe': r.get('metrics.stage8_MAPE', 0),
-                    'MedianAE': 0,
-                    'RMSLE': r.get('metrics.stage8_RMSLE', 0),
-                    'ExplainedVar': 0
+                    'R2': get_metric('metrics.stage8_R2'),
+                    'MAE': get_metric('metrics.stage8_MAE'),
+                    'RMSE': get_metric('metrics.stage8_RMSE'),
+                    'MAPE_Safe': get_metric('metrics.stage8_MAPE'),
+                    'RMSLE': get_metric('metrics.stage8_RMSLE')
                 },
                 'samples': {
-                    'train': int(r.get('params.train_samples_stage8', 0)),
-                    'test': int(r.get('params.test_samples_stage8', 0))
+                    'train': get_param('params.train_samples_stage8'),
+                    'test': get_param('params.test_samples_stage8')
                 }
             }
         }
+        
         return metrics
     except Exception as e:
-        st.warning(f"No se pudieron obtener métricas: {str(e)}")
+        st.warning(f"Error obteniendo métricas: {str(e)}")
         return None
 
 
@@ -336,6 +372,7 @@ def predict(df, m4, m8):
     
     return df.with_columns([pl.Series("PredictedFuel", preds)])
 
+
 def plot_distribution(df):
     """Distribution by stage"""
     libs = lazy_import_heavy_libs()
@@ -350,9 +387,154 @@ def plot_distribution(df):
         labels={"StageSequence": "Etapa", "PredictedFuel": "Combustible (L)"},
         title="Distribución del Consumo de Combustible por Etapa"
     )
-    fig.update_layout(template="plotly_white")
-    st.plotly_chart(fig, width='stretch')
+    fig.update_layout(template="plotly_white", height=500)
+    st.plotly_chart(fig, config={"responsive": True}, use_container_width=True)
 
+def plot_shap_analysis(truck_id: str):
+    """
+    Generate SHAP analysis for model interpretability
+    """
+    """
+    Generate SHAP analysis for both stages with a single button
+    """
+    import shap
+    import matplotlib.pyplot as plt
+
+    libs = lazy_import_heavy_libs()
+    pd = libs['pd']
+    np = libs['np']
+    
+    try:
+        # Cargar ambos modelos
+        mlflow = libs['mlflow']
+        mlflow_xgboost = libs['mlflow_xgboost']
+        
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        model_4 = mlflow_xgboost.load_model(f"models:/{truck_id}_stage4_fuel/Production")
+        model_8 = mlflow_xgboost.load_model(f"models:/{truck_id}_stage8_fuel/Production")
+        
+        # Cargar datos
+        df = load_data(truck_id)
+        if df is None or df.is_empty():
+            st.warning("No hay datos disponibles para análisis SHAP")
+            return
+            
+        df_cycles = transform_cycles(df)
+        
+        # Crear pestañas para cada etapa
+        tab1, tab2 = st.tabs(["🚛 Camión sin carga (Etapa 4)", "🚛 Camión con carga (Etapa 8)"])
+        
+        with tab1:
+            st.subheader("Análisis SHAP - Etapa 4")
+            _plot_shap_for_stage(model_4, df_cycles, 4, truck_id)
+        
+        with tab2:
+            st.subheader("Análisis SHAP - Etapa 8") 
+            _plot_shap_for_stage(model_8, df_cycles, 8, truck_id)
+            
+    except Exception as e:
+        st.error(f"Error en análisis SHAP: {str(e)}")
+
+def _plot_shap_for_stage(model, df_cycles, stage: int, truck_id: str):
+    """
+    Helper function to plot SHAP for a specific stage
+    """
+    import shap
+    import matplotlib.pyplot as plt
+    libs = lazy_import_heavy_libs()
+    pd = libs['pd']
+    np = libs['np']
+    pl = libs['pl']
+    
+    try:
+        # Preparar características según la etapa
+        if stage == 4:
+            features = FEATURES_STAGE4["numeric"] + FEATURES_STAGE4["categorical"]
+        else:
+            features = FEATURES_STAGE8["numeric"] + FEATURES_STAGE8["categorical"]
+        
+        # Filtrar datos de la etapa
+        df_stage = df_cycles.filter(pl.col("StageSequence") == stage)
+        if df_stage.is_empty():
+            st.warning(f"No hay datos para la etapa {stage}")
+            return
+            
+        # Seleccionar y limpiar datos
+        df_sample = df_stage.select(features).to_pandas()
+        
+        # Limpiar valores numéricos
+        df_sample = clean_numeric_values(df_sample)
+        
+        # Preprocesar variables categóricas
+        for col in df_sample.columns:
+            if df_sample[col].dtype == 'object':
+                # Convertir a códigos numéricos
+                df_sample[col] = df_sample[col].astype('category').cat.codes
+        
+        # Tomar muestra para no sobrecargar
+        if len(df_sample) > 100:
+            df_sample = df_sample.sample(100, random_state=42)
+        
+        with st.spinner(f"Calculando valores SHAP para etapa {stage}..."):
+            # Crear explainer
+            explainer = shap.TreeExplainer(model)
+            shap_values = explainer.shap_values(df_sample)
+            
+            # 1. Gráfica de importancia de características
+            st.markdown("**📊 Importancia de Características**")
+            fig_importance, ax = plt.subplots(figsize=(10, 6))
+            shap.summary_plot(shap_values, df_sample, plot_type="bar", show=False)
+            ax.set_title(f"Importancia SHAP - Etapa {stage}")
+            st.pyplot(fig_importance)
+            plt.close(fig_importance)
+            
+            # 2. Gráfica summary plot
+            st.markdown("**🔍 Impacto de Características**")
+            fig_summary, ax = plt.subplots(figsize=(12, 8))
+            shap.summary_plot(shap_values, df_sample, show=False)
+            ax.set_title(f"Impacto SHAP - Etapa {stage}")
+            st.pyplot(fig_summary)
+            plt.close(fig_summary)
+            
+            # 3. Mostrar valores SHAP en tabla
+            st.markdown("**📋 Valores SHAP Promedio**")
+            feature_importance = np.abs(shap_values).mean(0)
+            importance_df = pd.DataFrame({
+                'Característica': df_sample.columns,
+                'Importancia_SHAP': feature_importance
+            }).sort_values('Importancia_SHAP', ascending=False)
+            
+            st.dataframe(importance_df, use_container_width=True)
+                
+    except Exception as e:
+        st.error(f"Error en análisis SHAP para etapa {stage}: {str(e)}")
+
+def clean_numeric_values(df_sample):
+    """
+    Limpia valores numéricos que están en formato string
+    """
+    import re
+    import pandas as pd
+    for col in df_sample.columns:
+        if df_sample[col].dtype == 'object':
+            # Intenta convertir a numérico
+            df_sample[col] = pd.to_numeric(df_sample[col], errors='ignore')
+            
+            # Si aún es object, intenta limpiar strings como '[1.4301796E1]'
+            if df_sample[col].dtype == 'object':
+                def clean_value(x):
+                    if isinstance(x, str):
+                        # Remover corchetes y espacios
+                        cleaned = re.sub(r'[\[\]\s]', '', x)
+                        try:
+                            return float(cleaned)
+                        except:
+                            return x
+                    return x
+                
+                df_sample[col] = df_sample[col].apply(clean_value)
+    
+    return df_sample
 
 def plot_metrics_comparison(metrics: dict):
     """Compare Stage 4 vs Stage 8 metrics"""
@@ -380,12 +562,23 @@ def plot_metrics_comparison(metrics: dict):
         row = idx // 2 + 1
         col = idx % 2 + 1
         
+        val_4 = metrics_4[metric]
+        val_8 = metrics_8[metric]
+        
+        # Format text based on metric type
+        if metric == "MAE":
+            text_4 = f"{val_4:.3f}"
+            text_8 = f"{val_8:.3f}"
+        else:
+            text_4 = f"{val_4:.4f}"
+            text_8 = f"{val_8:.4f}"
+        
         fig.add_trace(
             go.Bar(
                 x=["Etapa 4", "Etapa 8"],
-                y=[metrics_4[metric], metrics_8[metric]],
+                y=[val_4, val_8],
                 marker_color=["blue", "red"],
-                text=[f"{metrics_4[metric]:.4f}", f"{metrics_8[metric]:.4f}"],
+                text=[text_4, text_8],
                 textposition="outside",
                 showlegend=False
             ),
@@ -393,16 +586,16 @@ def plot_metrics_comparison(metrics: dict):
         )
     
     fig.update_layout(
-        title_text="Comparación de Métricas",
+        title_text="Comparación de Métricas del Modelo",
         height=600,
         showlegend=False
     )
     
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, config={"responsive": True}, use_container_width=True)
 
 
 def plot_feature_by_stage(df, feature: str, stage: int):
-    """Plot feature vs predicted fuel for specific stage"""
+    """Plot feature vs predicted fuel for specific stage - WITHOUT TRENDLINE"""
     libs = lazy_import_heavy_libs()
     px = libs['px']
     pl = libs['pl']
@@ -411,17 +604,29 @@ def plot_feature_by_stage(df, feature: str, stage: int):
     
     if df_stage.empty or feature not in df_stage.columns:
         return
-    
+
+    features_translation_dict = {
+        "SpeedAvg": "Velocidad promedio",
+        "Distance": "Distancia",
+        "CycleDurationSeconds": "Duración del ciclo en segundos",
+        "TimeEfficiencyPercentage": "Porcentaje de eficiencia de tiempo",
+        "TotalMeasuredTonnage": "Tonelaje total medido",
+        "Shovel": "Pala",
+        "Destination": "Destino",
+        "DestinationType": "Tipo de destino",
+        "Material": "Material"
+    }
+
     fig = px.scatter(
         df_stage,
         x=feature,
         y="PredictedFuel",
-        trendline="ols",
-        title=f"Etapa {stage}: {feature} vs Combustible Predicho",
-        labels={"PredictedFuel": "Combustible Predicho (L)"}
+        title=f"{features_translation_dict[feature]} vs Combustible Predicho",
+        labels={"PredictedFuel": "Combustible Predicho (L)"},
+        opacity=0.6
     )
-    fig.update_layout(height=300, template="plotly_white")
-    st.plotly_chart(fig, width='stretch')
+    fig.update_layout(height=350, template="plotly_white")
+    st.plotly_chart(fig, config={"responsive": True}, use_container_width=True)
 
 
 def show_summary(df):
@@ -445,6 +650,7 @@ def show_summary(df):
     summary = summary[["Etapa", "Ciclos", "Media", "Desv_Est", "Mínimo", "Máximo"]]
     
     st.dataframe(summary.round(2), width='stretch')
+
 
 def plot_predictions_scatter(model, stage: int):
     """Create scatter plot of predictions vs actual for a specific stage."""
@@ -521,7 +727,7 @@ def plot_predictions_scatter(model, stage: int):
     )
 
     fig.add_annotation(
-        text=f"R² = {r2:.4f}<br>MAE = {mae_val:.2f}L<br>RMSE = {rmse:.2f}L",
+        text=f"R² = {r2:.4f}<br>MAE = {mae_val:.3f}L<br>RMSE = {rmse:.2f}L",
         xref="paper",
         yref="paper",
         x=0.05,
@@ -532,97 +738,8 @@ def plot_predictions_scatter(model, stage: int):
         borderwidth=1,
     )
 
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, config={"responsive": True}, use_container_width=True)
 
-def plot_shap_summary(model, stage: int):
-    """Generate SHAP summary plot with proper categorical handling"""
-    libs = lazy_import_heavy_libs()
-    shap = libs['shap']
-    plt = libs['plt']
-    np = libs['np']
-    pd = libs['pd']
-    go = libs['go']
-    
-    stage_key = "stage4" if stage == 4 else "stage8"
-    stage_model = model.model_stage4 if stage == 4 else model.model_stage8
-
-    if stage_key not in model.test_data:
-        st.warning(f"No hay datos de prueba para la Etapa {stage}")
-        return
-
-    X_test = model.test_data[stage_key]["X"]
-
-    try:
-        with st.spinner("Calculando valores SHAP..."):
-            # Convert categorical columns to numeric codes for SHAP
-            X_test_numeric = X_test.copy()
-            categorical_cols = X_test_numeric.select_dtypes(include=['category']).columns
-            
-            for col in categorical_cols:
-                X_test_numeric[col] = X_test_numeric[col].cat.codes
-            
-            # Ensure all data is numeric and not string
-            X_test_numeric = X_test_numeric.apply(pd.to_numeric, errors='coerce')
-            
-            # Fill any NaN values that might have appeared
-            X_test_numeric = X_test_numeric.fillna(0)
-            
-            # Create SHAP explainer
-            explainer = shap.TreeExplainer(
-                stage_model, 
-                feature_perturbation="interventional"
-            )
-            
-            # Calculate SHAP values
-            shap_values = explainer.shap_values(X_test_numeric, check_additivity=False)
-
-        stage_name = "Etapa 4 (Vacío)" if stage == 4 else "Etapa 8 (Cargado)"
-
-        # SHAP Summary Plot
-        st.subheader(f"Resumen SHAP - {stage_name}")
-        fig, ax = plt.subplots(figsize=(10, 8))
-        shap.summary_plot(
-            shap_values, 
-            X_test_numeric, 
-            feature_names=list(X_test.columns), 
-            show=False
-        )
-        plt.title(f"Importancia de Características - {stage_name}", fontsize=14, pad=20)
-        st.pyplot(fig)
-
-        # SHAP Feature Importance Bar Chart
-        st.subheader(f"Importancia de Características SHAP - {stage_name}")
-        shap_importance = np.abs(shap_values).mean(axis=0)
-        importance_df = pd.DataFrame(
-            {"feature": list(X_test.columns), "mean_abs_shap": shap_importance}
-        ).sort_values("mean_abs_shap", ascending=False)
-
-        fig2 = go.Figure(
-            go.Bar(
-                x=importance_df["mean_abs_shap"],
-                y=importance_df["feature"],
-                orientation="h",
-                marker_color="purple",
-                text=importance_df["mean_abs_shap"].round(4),
-                textposition="outside",
-            )
-        )
-
-        fig2.update_layout(
-            title=f"Valores Absolutos Medios de SHAP - {stage_name}",
-            xaxis_title="Media |Valor SHAP|",
-            yaxis_title="Característica",
-            template="plotly_white",
-            height=max(400, len(importance_df) * 25),
-            yaxis={"categoryorder": "total ascending"},
-        )
-
-        st.plotly_chart(fig2, width='stretch')
-
-    except Exception as e:
-        st.error(f"Error calculando SHAP: {str(e)}")
-        import traceback
-        st.code(traceback.format_exc())
 
 @st.cache_data
 def train_and_evaluate_model(truck_id: str):
@@ -642,6 +759,7 @@ def train_and_evaluate_model(truck_id: str):
     predictions_df = model.get_predictions()
 
     return model, results, predictions_df
+
     
 def add_report_generation_to_ui(df_predictions, truck_id: str, metrics: dict = None):
     """Generate and download PDF report"""
@@ -662,8 +780,8 @@ def add_report_generation_to_ui(df_predictions, truck_id: str, metrics: dict = N
         st.metric("Ciclos Cargados", f"{stage8_count:,}")
     
     st.markdown("---")
-    
-    if st.button("🎯 Generar Reporte PDF", type="primary", width='stretch'):
+
+    if st.button("🎯 Generar Reporte PDF"):
         with st.spinner("Generando reporte completo..."):
             try:
                 pdf_bytes = ReportGenerator(
@@ -680,20 +798,21 @@ def add_report_generation_to_ui(df_predictions, truck_id: str, metrics: dict = N
                     data=pdf_bytes,
                     file_name=filename,
                     mime="application/pdf",
-                    width='stretch'
+                    
                 )
             except Exception as e:
                 st.error(f"Error generando reporte: {str(e)}")
                 st.exception(e)
 
+
 # ========== MAIN APPLICATION ==========
-st.title("🏭 Predicción de Consumo de Combustible")
+st.title("Predicción de Consumo de Combustible")
 
 with st.sidebar:
     st.header("⚙️ Configuración")
     truck_id = st.selectbox("Seleccionar Camión", TRUCK_IDS, index=0)
 
-    if st.button("🚀 Cargar & Predecir", type="primary", width='stretch'):
+    if st.button("🚀 Cargar & Predecir"):
         st.session_state.ready = True
         st.session_state.truck = truck_id
         if 'last_truck' in st.session_state and st.session_state.last_truck != truck_id:
@@ -704,7 +823,7 @@ if "ready" not in st.session_state:
     st.info("👈 Selecciona un camión y haz clic en **Cargar & Predecir**")
     st.stop()
 
-# Load and process (AQUÍ se cargan las librerías pesadas solo cuando el usuario hace click)
+# Load and process
 with st.spinner("⚡ Cargando modelos..."):
     m4, m8 = load_models(st.session_state.truck)
 
@@ -732,101 +851,113 @@ if df_cycles is None or df_cycles.is_empty():
 with st.spinner("Generando predicciones..."):
     df_pred = predict(df_cycles, m4, m8)
 
-st.success(f"✅ {len(df_pred):,} ciclos procesados ​​con éxito")
+st.success(f"✅ {len(df_pred):,} ciclos procesados con éxito")
 
-# Visualizations
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🤖 Evaluación del Modelo",
-    "📊 Distribución",
-    "📉 Métricas",
-    "🔍 Análisis de Características",
-    "📄 Informe PDF"
-])
-
+# ========== ONLY 2 TABS ==========
+tab1, tab2 = st.tabs(["🤖 Evaluación del Modelo", "📄 Informe PDF"])
 
 with tab1:
-    st.header("Entrenamiento y evaluación de modelos")
-    st.write("Realizará el entrenamiento en tiempo real del modelo XGBoost para el camión seleccionado y mostrará las métricas de rendimiento junto con gráficos de predicciones y análisis SHAP, con los datos disponibles en la base de datos.")
+    st.header(f"📊 Evaluación del Modelo para el camión {truck_id}")
     
-    if st.button("🚀 Entrenar y evaluar el modelo", type="primary", width='stretch'):
-        with st.spinner("Modelo de entrenamiento en tiempo real..."):
-            model, results, predictions_df = train_and_evaluate_model(st.session_state.truck)
-            
-        if model and results:
-            st.success("✅ Modelo entrenada con éxito!")
-            
-            # Mostrar métricas para ambos stages
-            st.subheader("📊 Camión vacío")
-            col1, col2, col3 = st.columns(3)
-            if "stage4" in results:
-                metrics_res = results["stage4"]
-                with col1:
-                    st.metric("R² Score", f"{metrics_res.get('r2', 0):.4f}")
-                with col2:
-                    st.metric("MAE", f"{metrics_res.get('mae', 0):.2f} L")
-                with col3:
-                    st.metric("RMSE", f"{metrics_res.get('rmse', 0):.2f} L")
-            
-            plot_predictions_scatter(model, 4)
-            plot_shap_summary(model, 4)
-            
-            st.markdown("---")
-            
-            # Stage 8
-            st.subheader("📊 Camión con carga")
-            col1, col2, col3 = st.columns(3)
-            if "stage8" in results:
-                metrics_res = results["stage8"]
-                with col1:
-                    st.metric("R² Score", f"{metrics_res.get('r2', 0):.4f}")
-                with col2:
-                    st.metric("MAE", f"{metrics_res.get('mae', 0):.2f} L")
-                with col3:
-                    st.metric("RMSE", f"{metrics_res.get('rmse', 0):.2f} L")
-            
-            plot_predictions_scatter(model, 8)
-            plot_shap_summary(model, 8)
-
-with tab2:
-    plot_distribution(df_pred)
-    st.subheader("Resumen Estadístico")
-    show_summary(df_pred)
-
-with tab3:
+    # ========== SECCIÓN 1: MÉTRICAS DE PRODUCCIÓN ==========
     if metrics:
-        st.subheader("Métricas de rendimiento del modelo")
-        plot_metrics_comparison(metrics)
+        st.subheader("📈 Métricas de Producción (MLflow)")
         
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("Stage 4 R²", f"{metrics['stage4']['metrics']['R2']:.4f}")
-            st.metric("Stage 4 MAE", f"{metrics['stage4']['metrics']['MAE']:.2f} L")
+            st.markdown("**🚛 Camión sin carga**")
+            m4_metrics = metrics['stage4']['metrics']
+            subcol1, subcol2, subcol3 = st.columns(3)
+            with subcol1:
+                st.metric("R² Score", f"{m4_metrics['R2']:.4f}")
+            with subcol2:
+                st.metric("MAE", f"{m4_metrics['MAE']:.3f} L")
+            with subcol3:
+                st.metric("RMSE", f"{m4_metrics['RMSE']:.2f} L")
+        
         with col2:
-            st.metric("Stage 8 R²", f"{metrics['stage8']['metrics']['R2']:.4f}")
-            st.metric("Stage 8 MAE", f"{metrics['stage8']['metrics']['MAE']:.2f} L")
+            st.markdown("**🚛 Camión con carga**")
+            m8_metrics = metrics['stage8']['metrics']
+            subcol1, subcol2, subcol3 = st.columns(3)
+            with subcol1:
+                st.metric("R² Score", f"{m8_metrics['R2']:.4f}")
+            with subcol2:
+                st.metric("MAE", f"{m8_metrics['MAE']:.3f} L")
+            with subcol3:
+                st.metric("RMSE", f"{m8_metrics['RMSE']:.2f} L")
+        
+        st.markdown("---")
+        plot_metrics_comparison(metrics)
     else:
-        st.warning("No hay métricas disponibles de MLflow")
-
-with tab4:
-    st.subheader("Características y su impacto en el consumo de combustible")
+        st.info("ℹ️ No hay métricas de producción disponibles en MLflow")
+    
+    st.markdown("---")
+    
+    # ========== SECCIÓN 2: ENTRENAMIENTO Y EVALUACIÓN ==========
+    st.subheader("🎯 Entrenamiento y Evaluación del Modelo")
+    st.write("Entrena el modelo XGBoost en tiempo real con los datos actuales y visualiza las predicciones vs valores reales. Esto puede tardar unos segundos.")
+    
+    if st.button("🚀 Entrenar y Evaluar Modelo", type="primary"):
+        with st.spinner("⚡ Entrenando modelo en tiempo real..."):
+            model, results, predictions_df = train_and_evaluate_model(st.session_state.truck)
+        
+        if model and results:
+            st.success("✅ Modelo entrenado con éxito!")
+            
+            # Stage 4 Results
+            st.markdown("---")
+            st.subheader("📊 Comparación de niveles reales (aprox.) y predicciones de combustible (modelo) durante ciclo de camion sin carga")
+            plot_predictions_scatter(model, 4)
+            
+            # Stage 8 Results
+            st.markdown("---")
+            st.subheader("📊 Comparación de niveles reales (aprox.) y predicciones de combustible (modelo) durante ciclo de camion con carga")
+            plot_predictions_scatter(model, 8)
+            
+        else:
+            st.error("❌ Error durante el entrenamiento del modelo")
+    
+    st.markdown("---")
+    
+    # ========== SECCIÓN 3: DISTRIBUCIÓN Y ESTADÍSTICAS ==========
+    st.subheader("📊 Distribución del Consumo de Combustible")
+    plot_distribution(df_pred)
+    
+    st.subheader("📈 Resumen Estadístico")
+    show_summary(df_pred)
+    
+    st.markdown("---")
+    
+    # ========== SECCIÓN 4: ANÁLISIS DE CARACTERÍSTICAS ==========
+    st.subheader("🔍 Análisis de variables numericos vs Predicción de combustible")
     
     col1, col2 = st.columns(2)
+    
     with col1:
-        st.write("**Camión vacío**")
-        plot_feature_by_stage(df_pred, "Distance", 4)
-        plot_feature_by_stage(df_pred, "SpeedAvg", 4)
+        st.markdown("**🚛 Camión sin carga**")
+        for feat in FEATURES_STAGE4["numeric"]:
+            if feat in df_pred.columns:
+                plot_feature_by_stage(df_pred, feat, 4)
     
     with col2:
-        st.write("**Camión con carga**")
-        plot_feature_by_stage(df_pred, "Distance", 8)
-        plot_feature_by_stage(df_pred, "TotalMeasuredTonnage", 8)
+        st.markdown("**🚛 Camión con Carga**")
+        for feat in FEATURES_STAGE8["numeric"]:
+            if feat in df_pred.columns:
+                plot_feature_by_stage(df_pred, feat, 8)
+    
+    st.markdown("---")
 
-with tab5:
+    # ========== SECCIÓN 5: VISTA PREVIA DE DATOS ==========
+    with st.expander("🔍 Ver Datos de Predicción Completos"):
+        cols = ["TimeStampIni", "TimeStampFin", "StageSequence", "PredictedFuel", 
+                "Distance", "SpeedAvg", "CycleDurationSeconds", "TimeEfficiencyPercentage",
+                "TotalMeasuredTonnage", "Destination", "DestinationType", "Material", "Shovel"]
+        available_cols = [c for c in cols if c in df_pred.columns]
+        st.dataframe(
+            df_pred.select(available_cols).to_pandas(), 
+            height=400, 
+            width='stretch'
+        )
+
+with tab2:
     add_report_generation_to_ui(df_pred, st.session_state.truck, metrics)
-
-# Data preview
-with st.expander("🔍 Ver datos de predicción"):
-    cols = ["TimeStampIni", "StageSequence", "PredictedFuel", "Distance",
-            "SpeedAvg", "TotalMeasuredTonnage", "Destination", "Material"]
-    available_cols = [c for c in cols if c in df_pred.columns]
-    st.dataframe(df_pred.select(available_cols).to_pandas(), height=400)
